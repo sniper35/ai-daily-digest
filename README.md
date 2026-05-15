@@ -22,7 +22,7 @@ Agent 会依次询问：
 |------|------|--------|
 | 时间范围 | 24h / 48h / 72h / 7天 | 48h |
 | 精选数量 | 10 / 15 / 20 篇 | 15 篇 |
-| 输出语言 | 中文 / English | 中文 |
+| 输出语言 | English / 中文 | English |
 | Gemini API Key | 手动输入（首次需要，之后自动记忆） | — |
 
 配置会自动保存到 `~/.hn-daily-digest/config.json`，下次运行可一键复用。
@@ -34,7 +34,7 @@ export GEMINI_API_KEY="your-key"
 export OPENAI_API_KEY="your-openai-compatible-key"  # 可选，Gemini 失败时兜底
 export OPENAI_API_BASE="https://api.deepseek.com/v1" # 可选，默认 https://api.openai.com/v1
 export OPENAI_MODEL="deepseek-chat"                  # 可选，不填会自动推断
-npx -y bun scripts/digest.ts --hours 48 --top-n 15 --lang zh --output ./digest.md
+npx -y bun scripts/digest.ts --hours 48 --top-n 15 --lang en --output ./digest.md
 ```
 
 ## 功能

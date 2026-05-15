@@ -14,7 +14,7 @@ const FEED_CONCURRENCY = 10;
 const GEMINI_BATCH_SIZE = 10;
 const MAX_CONCURRENT_GEMINI = 2;
 
-// 90 RSS feeds from Hacker News Popularity Contest 2025 (curated by Karpathy)
+// RSS feeds from the Hacker News Popularity Contest 2025 list plus selected additions.
 const RSS_FEEDS: Array<{ name: string; xmlUrl: string; htmlUrl: string }> = [
   { name: "simonwillison.net", xmlUrl: "https://simonwillison.net/atom/everything/", htmlUrl: "https://simonwillison.net" },
   { name: "jeffgeerling.com", xmlUrl: "https://www.jeffgeerling.com/blog.xml", htmlUrl: "https://jeffgeerling.com" },
@@ -108,6 +108,47 @@ const RSS_FEEDS: Array<{ name: string; xmlUrl: string; htmlUrl: string }> = [
   { name: "mjg59.dreamwidth.org", xmlUrl: "https://mjg59.dreamwidth.org/data/rss", htmlUrl: "https://mjg59.dreamwidth.org" },
   { name: "computer.rip", xmlUrl: "https://computer.rip/rss.xml", htmlUrl: "https://computer.rip" },
   { name: "tedunangst.com", xmlUrl: "https://www.tedunangst.com/flak/rss", htmlUrl: "https://tedunangst.com" },
+  { name: "blog.evjang.com", xmlUrl: "https://blog.evjang.com/feeds/posts/default", htmlUrl: "https://blog.evjang.com" },
+  { name: "sankalp.bearblog.dev", xmlUrl: "https://sankalp.bearblog.dev/feed/", htmlUrl: "https://sankalp.bearblog.dev" },
+  { name: "openai.com", xmlUrl: "https://openai.com/news/rss.xml", htmlUrl: "https://openai.com" },
+  { name: "blog.ezyang.com", xmlUrl: "https://blog.ezyang.com/feed.xml", htmlUrl: "https://blog.ezyang.com" },
+  { name: "patricktoulme.substack.com", xmlUrl: "https://patricktoulme.substack.com/feed", htmlUrl: "https://patricktoulme.substack.com" },
+  { name: "blog.miigon.net", xmlUrl: "https://blog.miigon.net/feed.xml", htmlUrl: "https://blog.miigon.net" },
+  { name: "brooker.co.za", xmlUrl: "https://brooker.co.za/blog/rss.xml", htmlUrl: "https://brooker.co.za" },
+  { name: "cudaforfun.substack.com", xmlUrl: "https://cudaforfun.substack.com/feed", htmlUrl: "https://cudaforfun.substack.com" },
+  { name: "veitner.bearblog.dev", xmlUrl: "https://veitner.bearblog.dev/feed/", htmlUrl: "https://veitner.bearblog.dev" },
+  { name: "blog.eleuther.ai", xmlUrl: "https://blog.eleuther.ai/index.xml", htmlUrl: "https://blog.eleuther.ai" },
+  { name: "blog.vllm.ai", xmlUrl: "https://vllm.ai/blog/rss.xml", htmlUrl: "https://blog.vllm.ai" },
+  { name: "dustintran.com", xmlUrl: "https://dustintran.com/blog/feed.xml", htmlUrl: "https://dustintran.com" },
+  { name: "aleksagordic.com", xmlUrl: "https://www.aleksagordic.com/feed.xml", htmlUrl: "https://www.aleksagordic.com" },
+  { name: "blog.edward-li.com", xmlUrl: "https://blog.edward-li.com/index.xml", htmlUrl: "https://blog.edward-li.com" },
+  { name: "blog.runpod.io", xmlUrl: "https://www.runpod.io/blog/rss.xml", htmlUrl: "https://blog.runpod.io" },
+  { name: "blog.sinatras.dev", xmlUrl: "https://blog.sinatras.dev/rss.xml", htmlUrl: "https://blog.sinatras.dev" },
+  { name: "cruciblecapital.substack.com", xmlUrl: "https://cruciblecapital.substack.com/feed", htmlUrl: "https://cruciblecapital.substack.com" },
+  { name: "developer.nvidia.com/blog", xmlUrl: "https://developer.nvidia.com/blog/feed", htmlUrl: "https://developer.nvidia.com/blog" },
+  { name: "fkong.tech", xmlUrl: "https://fkong.tech/index.xml", htmlUrl: "https://fkong.tech" },
+  { name: "pytorch.org", xmlUrl: "https://pytorch.org/feed/", htmlUrl: "https://pytorch.org" },
+  { name: "anyscale.com", xmlUrl: "https://www.anyscale.com/rss.xml", htmlUrl: "https://www.anyscale.com" },
+  { name: "cursor.com", xmlUrl: "https://cursor.com/atom.xml", htmlUrl: "https://www.cursor.com" },
+  { name: "danielvegamyhre.github.io", xmlUrl: "https://danielvegamyhre.github.io/feed.xml", htmlUrl: "https://danielvegamyhre.github.io" },
+  { name: "goyalpramod.github.io", xmlUrl: "https://goyalpramod.github.io/feed.xml", htmlUrl: "https://goyalpramod.github.io" },
+  { name: "huggingface.co", xmlUrl: "https://huggingface.co/blog/feed.xml", htmlUrl: "https://huggingface.co" },
+  { name: "latent.space", xmlUrl: "https://www.latent.space/feed", htmlUrl: "https://www.latent.space" },
+  { name: "yang-song.net", xmlUrl: "https://yang-song.net/feed.xml", htmlUrl: "https://yang-song.net" },
+  { name: "colah.github.io", xmlUrl: "https://colah.github.io/rss.xml", htmlUrl: "https://colah.github.io" },
+  { name: "gau-nernst.github.io", xmlUrl: "https://gau-nernst.github.io/index.xml", htmlUrl: "https://gau-nernst.github.io" },
+  { name: "thinkingmachines.ai", xmlUrl: "https://thinkingmachines.ai/index.xml", htmlUrl: "https://thinkingmachines.ai" },
+  { name: "tridao.me", xmlUrl: "https://tridao.me/feed.xml", htmlUrl: "https://tridao.me" },
+  { name: "medium.com/@joaolages", xmlUrl: "https://medium.com/feed/@joaolages", htmlUrl: "https://medium.com/@joaolages" },
+  { name: "newsletter.semianalysis.com", xmlUrl: "https://newsletter.semianalysis.com/feed", htmlUrl: "https://newsletter.semianalysis.com" },
+  { name: "tensoreconomics.com", xmlUrl: "https://www.tensoreconomics.com/feed", htmlUrl: "https://www.tensoreconomics.com" },
+  { name: "abhik.ai", xmlUrl: "https://www.abhik.ai/rss/feed.xml", htmlUrl: "https://www.abhik.ai" },
+  { name: "gordicaleksa.medium.com", xmlUrl: "https://gordicaleksa.medium.com/feed", htmlUrl: "https://gordicaleksa.medium.com" },
+  { name: "kapilsharma.dev", xmlUrl: "https://www.kapilsharma.dev/feed.xml", htmlUrl: "https://www.kapilsharma.dev" },
+  { name: "lei.chat", xmlUrl: "https://www.lei.chat/index.xml", htmlUrl: "https://www.lei.chat" },
+  { name: "siboehm.com", xmlUrl: "https://siboehm.com/feed.xml", htmlUrl: "https://siboehm.com" },
+  { name: "lilianweng.github.io", xmlUrl: "https://lilianweng.github.io/index.xml", htmlUrl: "https://lilianweng.github.io" },
+  { name: "szymonozog.github.io", xmlUrl: "https://szymonozog.github.io/feed.xml", htmlUrl: "https://szymonozog.github.io" },
 ];
 
 // ============================================================================
@@ -988,7 +1029,7 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
 
   // ── Footer ──
   report += `*生成于 ${dateStr} ${now.toISOString().split('T')[1]?.slice(0, 5) || ''} | 扫描 ${stats.successFeeds} 源 → 获取 ${stats.totalArticles} 篇 → 精选 ${articles.length} 篇*\n`;
-  report += `*基于 [Hacker News Popularity Contest 2025](https://refactoringenglish.com/tools/hn-popularity/) RSS 源列表，由 [Andrej Karpathy](https://x.com/karpathy) 推荐*\n`;
+  report += `*基于 [Hacker News Popularity Contest 2025](https://refactoringenglish.com/tools/hn-popularity/) RSS 源列表，并包含自选订阅源*\n`;
   report += `*由「懂点儿AI」制作，欢迎关注同名微信公众号获取更多 AI 实用技巧 💡*\n`;
 
   return report;
@@ -999,7 +1040,7 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
 // ============================================================================
 
 function printUsage(): never {
-  console.log(`AI Daily Digest - AI-powered RSS digest from 90 top tech blogs
+  console.log(`AI Daily Digest - AI-powered RSS digest from curated tech blogs
 
 Usage:
   bun scripts/digest.ts [options]
@@ -1007,7 +1048,7 @@ Usage:
 Options:
   --hours <n>     Time range in hours (default: 48)
   --top-n <n>     Number of top articles to include (default: 15)
-  --lang <lang>   Summary language: zh or en (default: zh)
+  --lang <lang>   Summary language: zh or en (default: en)
   --output <path> Output file path (default: ./digest-YYYYMMDD.md)
   --help          Show this help
 
@@ -1018,7 +1059,7 @@ Environment:
   OPENAI_MODEL     Optional fallback model (default: deepseek-chat for DeepSeek base, else gpt-4o-mini)
 
 Examples:
-  bun scripts/digest.ts --hours 24 --top-n 10 --lang zh
+  bun scripts/digest.ts --hours 24 --top-n 10 --lang en
   bun scripts/digest.ts --hours 72 --top-n 20 --lang en --output ./my-digest.md
 `);
   process.exit(0);
@@ -1030,7 +1071,7 @@ async function main(): Promise<void> {
   
   let hours = 48;
   let topN = 15;
-  let lang: 'zh' | 'en' = 'zh';
+  let lang: 'zh' | 'en' = 'en';
   let outputPath = '';
   
   for (let i = 0; i < args.length; i++) {

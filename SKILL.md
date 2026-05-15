@@ -46,7 +46,7 @@ Agent 在执行前**必须检查**此文件是否存在：
   "geminiApiKey": "",
   "timeRange": 48,
   "topN": 15,
-  "language": "zh",
+  "language": "en",
   "lastUsed": "2026-02-14T12:00:00Z"
 }
 ```
@@ -114,8 +114,8 @@ question({
       header: "输出语言",
       question: "摘要使用什么语言？",
       options: [
-        { label: "中文 (Recommended)", description: "摘要翻译为中文" },
-        { label: "English", description: "保持英文原文" }
+        { label: "English (Recommended)", description: "Keep summaries in English" },
+        { label: "中文", description: "摘要翻译为中文" }
       ]
     }
   ]
@@ -152,7 +152,7 @@ export OPENAI_MODEL="deepseek-chat"
 npx -y bun ${SKILL_DIR}/scripts/digest.ts \
   --hours <timeRange> \
   --top-n <topN> \
-  --lang <zh|en> \
+  --lang <en|zh> \
   --output ./output/digest-$(date +%Y%m%d).md
 ```
 
