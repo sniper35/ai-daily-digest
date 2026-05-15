@@ -29,6 +29,7 @@ Agent execution notes:
 | Script | Purpose |
 |---|---|
 | `scripts/digest.ts` | Main script for RSS fetching, AI scoring, summaries, and report generation |
+| `scripts/run-digest-automation.ts` | Codex App automation wrapper that loads saved config and writes timestamped/latest reports |
 
 ## Persisted Configuration
 
@@ -47,9 +48,10 @@ Config shape:
 ```json
 {
   "anthropicApiKey": "",
-  "anthropicModel": "claude-opus-4-6",
+  "anthropicModel": "claude-sonnet-4-6",
   "anthropicEffort": "xhigh",
   "anthropicMaxTokens": 100000,
+  "anthropicBatch": true,
   "timeRange": 48,
   "topN": 25,
   "language": "en",
@@ -67,9 +69,10 @@ If saved config exists, present the last-used settings:
 Saved digest configuration found:
 
 - Time range: ${config.timeRange} hours
-- Selected articles: ${config.topN}
-- Anthropic model: ${config.anthropicModel || 'claude-opus-4-6'}
+- Selected articles: up to ${config.topN} after quality filtering
+- Anthropic model: ${config.anthropicModel || 'claude-sonnet-4-6'}
 - Anthropic effort: ${config.anthropicEffort || 'xhigh'}
+- Anthropic batch mode: ${config.anthropicBatch === false ? 'off' : 'on'}
 - Output language: English
 
 Choose whether to reuse this configuration or reconfigure.
@@ -82,7 +85,7 @@ Collect these settings:
 | Setting | Options | Default |
 |---|---|---|
 | Time range | 24 hours / 48 hours / 72 hours / 7 days | 48 hours |
-| Selected articles | 10 / 15 / 25 | 25 |
+| Selected articles | Up to 10 / 15 / 25 after quality filtering | 25 |
 | Output language | English | English |
 
 ### Step 1b: AI API Key
@@ -104,9 +107,10 @@ Optional fallback providers:
 mkdir -p ./output
 
 export ANTHROPIC_API_KEY="<key>"
-export ANTHROPIC_MODEL="claude-opus-4-6"
+export ANTHROPIC_MODEL="claude-sonnet-4-6"
 export ANTHROPIC_EFFORT="xhigh"
 export ANTHROPIC_MAX_TOKENS="100000"
+export ANTHROPIC_BATCH="true"
 
 # Optional fallbacks
 export GEMINI_API_KEY="<fallback-key>"
@@ -128,9 +132,10 @@ mkdir -p ~/.hn-daily-digest
 cat > ~/.hn-daily-digest/config.json << 'EOF'
 {
   "anthropicApiKey": "<key>",
-  "anthropicModel": "claude-opus-4-6",
+  "anthropicModel": "claude-sonnet-4-6",
   "anthropicEffort": "xhigh",
   "anthropicMaxTokens": 100000,
+  "anthropicBatch": true,
   "timeRange": <hours>,
   "topN": <topN>,
   "language": "en",
@@ -148,12 +153,31 @@ On success, report:
 - Summary stats: scanned feeds, fetched articles, recent articles, selected articles
 - Top 3 preview with English titles and one-sentence summaries
 
+### Codex App Automation
+
+For scheduled Codex App runs, use the project automation assets in the repo:
+
+- Prompt: `automation/codex-app-automation-prompt.md`
+- Runner: `/Users/dongw/.bun/bin/bun scripts/run-digest-automation.ts`
+- Readiness check: `/Users/dongw/.bun/bin/bun scripts/run-digest-automation.ts --check-config`
+- Project rule: `.codex/rules/ai-daily-digest-automation.rules`
+
+Use a standalone project automation in local project mode, not a worktree, so generated reports land under this repo's `output/` directory. Restart Codex after changing `.rules` files.
+
 The generated Markdown report contains:
 
 1. Highlights: a 3 to 5 sentence trend summary
 2. Top reads: the top three articles with summary, reason, keyword tags, and each raw original link
 3. Data overview: tables, Mermaid charts, plain-text keyword chart, and tag cloud
-4. Category article lists grouped by AI/ML, AI infra, inference performance, CUDA kernels, PyTorch ecosystem, vLLM updates, security, engineering, tools/open source, opinion, and other, with each raw original link shown
+4. Failed feeds: unavailable, timed-out, blocked, or empty feeds skipped during the run
+5. Category article lists grouped by AI/ML, AI infra, inference performance, CUDA kernels, PyTorch ecosystem, vLLM updates, security, tools/open source, opinion, and other, with each raw original link shown
+
+Selection policy:
+
+- Strongly prefer technical AI infrastructure, inference performance, CUDA/Triton kernels, PyTorch internals, vLLM, and production model-serving work.
+- Treat the selected article count as a maximum, not a quota. Output fewer articles when fewer than the requested maximum clear the quality gate.
+- Filter out general software engineering, policy/regulation/legal stories, broad opinion pieces, general security news, career/culture posts, and company drama.
+- Include security only when it directly affects AI infrastructure, model serving, GPU runtimes, PyTorch, vLLM, or production ML systems.
 
 On failure, show the error and likely cause, such as invalid API key, network access, or feed availability.
 
@@ -174,12 +198,14 @@ On failure, show the error and likely cause, such as invalid API key, network ac
 
 - Bun runtime, available through `npx -y bun`
 - At least one AI API key, preferably `ANTHROPIC_API_KEY`
-- Optional: `ANTHROPIC_MODEL`, `ANTHROPIC_EFFORT`, `ANTHROPIC_MAX_TOKENS`, `OPENAI_API_BASE`, `OPENAI_MODEL`
+- Optional: `ANTHROPIC_MODEL`, `ANTHROPIC_EFFORT`, `ANTHROPIC_MAX_TOKENS`, `ANTHROPIC_BATCH`, `OPENAI_API_BASE`, `OPENAI_MODEL`
 - Network access for RSS feeds and AI API calls
+
+Default Anthropic settings use Claude Sonnet 4.6 with Message Batches enabled. Batch mode is asynchronous and can take longer than direct Messages API calls, but Anthropic prices batch requests at a 50% discount.
 
 ## Feed Sources
 
-The feed list is based on Hacker News-popular technology blogs plus selected AI and engineering sources. The full list is embedded in `scripts/digest.ts`.
+The feed list is based on Hacker News-popular technology blogs plus selected AI infrastructure and runtime sources. The full list is embedded in `scripts/digest.ts`.
 
 Specialized AI runtime coverage includes vLLM, PyTorch, NVIDIA Developer Blog, CUDA For Fun, Tri Dao, Together AI, Runpod, Anyscale, Hugging Face, and SemiAnalysis sources.
 

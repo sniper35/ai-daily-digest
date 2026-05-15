@@ -7,17 +7,23 @@ import process from 'node:process';
 // ============================================================================
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
-const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_DEFAULT_MODEL = 'claude-opus-4-6';
+const ANTHROPIC_MESSAGES_API_URL = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_BATCHES_API_URL = 'https://api.anthropic.com/v1/messages/batches';
+const ANTHROPIC_DEFAULT_MODEL = 'claude-sonnet-4-6';
 const ANTHROPIC_DEFAULT_EFFORT: AnthropicEffort = 'xhigh';
 const ANTHROPIC_DEFAULT_MAX_TOKENS = 100_000;
+const ANTHROPIC_DEFAULT_BATCH = true;
+const ANTHROPIC_BATCH_POLL_INTERVAL_MS = 10_000;
+const ANTHROPIC_BATCH_POLL_TIMEOUT_MS = 30 * 60_000;
 const OPENAI_DEFAULT_API_BASE = 'https://api.openai.com/v1';
 const OPENAI_DEFAULT_MODEL = 'gpt-4o-mini';
 const DEFAULT_TOP_N = 25;
 const FEED_FETCH_TIMEOUT_MS = 15_000;
 const FEED_CONCURRENCY = 10;
 const GEMINI_BATCH_SIZE = 10;
-const MAX_CONCURRENT_GEMINI = 2;
+const MIN_OUTPUT_SELECTION_SCORE = 25;
+const MIN_OUTPUT_RELEVANCE_SCORE = 7;
+const MIN_OUTPUT_QUALITY_SCORE = 6;
 
 // RSS feeds from the Hacker News Popularity Contest 2025 list plus selected additions.
 const RSS_FEEDS: Array<{ name: string; xmlUrl: string; htmlUrl: string }> = [
@@ -169,7 +175,6 @@ type CategoryId =
   | 'pytorch-ecosystem'
   | 'vllm-updates'
   | 'security'
-  | 'engineering'
   | 'tools'
   | 'opinion'
   | 'other';
@@ -185,11 +190,60 @@ const CATEGORY_META: Record<CategoryId, { emoji: string; label: string }> = {
   'pytorch-ecosystem':     { emoji: '🔥', label: 'PyTorch Ecosystem' },
   'vllm-updates':          { emoji: '⚡', label: 'vLLM Updates' },
   'security':              { emoji: '🔒', label: 'Security' },
-  'engineering':           { emoji: '⚙️', label: 'Engineering' },
   'tools':                 { emoji: '🛠', label: 'Tools / Open Source' },
   'opinion':               { emoji: '💡', label: 'Opinion' },
   'other':                 { emoji: '📝', label: 'Other' },
 };
+
+const DEPRIORITIZED_CATEGORY_PENALTY = 10;
+const AI_INFRA_CATEGORY_BOOST: Record<CategoryId, number> = {
+  'ai-infra': 12,
+  'inference-performance': 12,
+  'cuda-kernels': 12,
+  'pytorch-ecosystem': 10,
+  'vllm-updates': 10,
+  'ai-ml': 3,
+  'tools': 0,
+  'security': -DEPRIORITIZED_CATEGORY_PENALTY,
+  'opinion': -12,
+  'other': -8,
+};
+
+const TARGET_OUTPUT_CATEGORIES = new Set<CategoryId>([
+  'ai-infra',
+  'inference-performance',
+  'cuda-kernels',
+  'pytorch-ecosystem',
+  'vllm-updates',
+]);
+
+const TECHNICAL_AI_INFRA_SOURCES = new Set([
+  'vllm.ai',
+  'pytorch.org',
+  'developer.nvidia.com/blog',
+  'cudaforfun.substack.com',
+  'tridao.me',
+  'siboehm.com',
+  'blog.runpod.io',
+  'anyscale.com',
+  'huggingface.co',
+  'together.ai',
+  'newsletter.semianalysis.com',
+  'blog.ezyang.com',
+]);
+
+const TECHNICAL_AI_INFRA_TERMS = [
+  'ai infra', 'infrastructure', 'serving', 'model serving', 'inference', 'latency', 'throughput',
+  'batching', 'kv cache', 'prefix caching', 'speculative decoding', 'quantization', 'scheduler',
+  'cuda', 'triton', 'kernel', 'gpu', 'tensor core', 'flashattention', 'pytorch', 'torch.compile',
+  'torchinductor', 'aten', 'vllm', 'pagedattention', 'ray', 'runpod', 'h100', 'b200',
+];
+
+const LOW_VALUE_TOPIC_TERMS = [
+  'policy/regulation/legal', 'policy', 'regulation', 'regulatory', 'legal', 'lawsuit',
+  'politics', 'government', 'culture', 'career', 'opinion', 'essay', 'security breach',
+  'vulnerability', 'malware', 'privacy',
+];
 
 interface Article {
   title: string;
@@ -200,8 +254,28 @@ interface Article {
   sourceUrl: string;
 }
 
+interface FeedFailure {
+  name: string;
+  xmlUrl: string;
+  htmlUrl: string;
+  reason: string;
+}
+
+interface FeedFetchResult {
+  articles: Article[];
+  failure?: FeedFailure;
+}
+
+interface FeedFetchSummary {
+  articles: Article[];
+  failedFeeds: FeedFailure[];
+  successCount: number;
+  failCount: number;
+}
+
 interface ScoredArticle extends Article {
   score: number;
+  selectionScore: number;
   scoreBreakdown: {
     relevance: number;
     quality: number;
@@ -212,6 +286,18 @@ interface ScoredArticle extends Article {
   displayTitle: string;
   summary: string;
   reason: string;
+}
+
+interface RankedArticle extends Article {
+  totalScore: number;
+  selectionScore: number;
+  breakdown: {
+    relevance: number;
+    quality: number;
+    timeliness: number;
+    category: CategoryId;
+    keywords: string[];
+  };
 }
 
 interface GeminiScoringResult {
@@ -236,6 +322,7 @@ interface GeminiSummaryResult {
 
 interface AIClient {
   call(prompt: string): Promise<string>;
+  callBatch(prompts: string[]): Promise<string[]>;
 }
 
 // ============================================================================
@@ -360,10 +447,11 @@ function parseRSSItems(xml: string): Array<{ title: string; link: string; pubDat
 // Feed Fetching
 // ============================================================================
 
-async function fetchFeed(feed: { name: string; xmlUrl: string; htmlUrl: string }): Promise<Article[]> {
+async function fetchFeed(feed: { name: string; xmlUrl: string; htmlUrl: string }): Promise<FeedFetchResult> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), FEED_FETCH_TIMEOUT_MS);
+    timeout = setTimeout(() => controller.abort(), FEED_FETCH_TIMEOUT_MS);
     
     const response = await fetch(feed.xmlUrl, {
       signal: controller.signal,
@@ -374,6 +462,7 @@ async function fetchFeed(feed: { name: string; xmlUrl: string; htmlUrl: string }
     });
     
     clearTimeout(timeout);
+    timeout = undefined;
     
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -381,29 +470,42 @@ async function fetchFeed(feed: { name: string; xmlUrl: string; htmlUrl: string }
     
     const xml = await response.text();
     const items = parseRSSItems(xml);
-    
-    return items.map(item => ({
-      title: item.title,
-      link: item.link,
-      pubDate: parseDate(item.pubDate) || new Date(0),
-      description: item.description,
-      sourceName: feed.name,
-      sourceUrl: feed.htmlUrl,
-    }));
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    // Only log non-abort errors to reduce noise
-    if (!msg.includes('abort')) {
-      console.warn(`[digest] ✗ ${feed.name}: ${msg}`);
-    } else {
-      console.warn(`[digest] ✗ ${feed.name}: timeout`);
+
+    if (items.length === 0) {
+      const reason = '0 parsed items';
+      console.warn(`[digest] ✗ ${feed.name}: ${reason}`);
+      return {
+        articles: [],
+        failure: { name: feed.name, xmlUrl: feed.xmlUrl, htmlUrl: feed.htmlUrl, reason },
+      };
     }
-    return [];
+    
+    return {
+      articles: items.map(item => ({
+        title: item.title,
+        link: item.link,
+        pubDate: parseDate(item.pubDate) || new Date(0),
+        description: item.description,
+        sourceName: feed.name,
+        sourceUrl: feed.htmlUrl,
+      })),
+    };
+  } catch (error) {
+    if (timeout) clearTimeout(timeout);
+    const msg = error instanceof Error ? error.message : String(error);
+    const isTimeout = error instanceof Error && (error.name === 'AbortError' || msg.includes('abort'));
+    const reason = isTimeout ? 'timeout' : msg;
+    console.warn(`[digest] ✗ ${feed.name}: ${reason}`);
+    return {
+      articles: [],
+      failure: { name: feed.name, xmlUrl: feed.xmlUrl, htmlUrl: feed.htmlUrl, reason },
+    };
   }
 }
 
-async function fetchAllFeeds(feeds: typeof RSS_FEEDS): Promise<Article[]> {
+async function fetchAllFeeds(feeds: typeof RSS_FEEDS): Promise<FeedFetchSummary> {
   const allArticles: Article[] = [];
+  const failedFeeds: FeedFailure[] = [];
   let successCount = 0;
   let failCount = 0;
   
@@ -411,12 +513,24 @@ async function fetchAllFeeds(feeds: typeof RSS_FEEDS): Promise<Article[]> {
     const batch = feeds.slice(i, i + FEED_CONCURRENCY);
     const results = await Promise.allSettled(batch.map(fetchFeed));
     
-    for (const result of results) {
-      if (result.status === 'fulfilled' && result.value.length > 0) {
-        allArticles.push(...result.value);
+    for (const [index, result] of results.entries()) {
+      const feed = batch[index]!;
+      if (result.status === 'fulfilled' && result.value.articles.length > 0) {
+        allArticles.push(...result.value.articles);
         successCount++;
       } else {
         failCount++;
+        if (result.status === 'fulfilled') {
+          failedFeeds.push(result.value.failure ?? {
+            name: feed.name,
+            xmlUrl: feed.xmlUrl,
+            htmlUrl: feed.htmlUrl,
+            reason: '0 parsed items',
+          });
+        } else {
+          const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+          failedFeeds.push({ name: feed.name, xmlUrl: feed.xmlUrl, htmlUrl: feed.htmlUrl, reason });
+        }
       }
     }
     
@@ -425,12 +539,42 @@ async function fetchAllFeeds(feeds: typeof RSS_FEEDS): Promise<Article[]> {
   }
   
   console.log(`[digest] Fetched ${allArticles.length} articles from ${successCount} feeds (${failCount} failed)`);
-  return allArticles;
+  return { articles: allArticles, failedFeeds, successCount, failCount };
 }
 
 // ============================================================================
 // AI Providers (Anthropic primary + Gemini/OpenAI-compatible fallbacks)
 // ============================================================================
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function parseBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
+  if (value === undefined) return defaultValue;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return defaultValue;
+}
+
+function buildAnthropicMessageParams(prompt: string, model: string, effort: AnthropicEffort, maxTokens: number) {
+  return {
+    model,
+    max_tokens: maxTokens,
+    messages: [{ role: 'user', content: prompt }],
+    thinking: { type: 'adaptive' },
+    output_config: { effort: toAnthropicApiEffort(effort) },
+    temperature: 1,
+  };
+}
+
+function extractAnthropicText(data: { content?: Array<{ type?: string; text?: string }> }): string {
+  return data.content
+    ?.filter(item => item.type === 'text' && typeof item.text === 'string')
+    .map(item => item.text)
+    .join('\n') || '';
+}
 
 async function callAnthropic(
   prompt: string,
@@ -439,21 +583,14 @@ async function callAnthropic(
   effort: AnthropicEffort,
   maxTokens: number
 ): Promise<string> {
-  const response = await fetch(ANTHROPIC_API_URL, {
+  const response = await fetch(ANTHROPIC_MESSAGES_API_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens,
-      messages: [{ role: 'user', content: prompt }],
-      thinking: { type: 'adaptive' },
-      output_config: { effort: toAnthropicApiEffort(effort) },
-      temperature: 1,
-    }),
+    body: JSON.stringify(buildAnthropicMessageParams(prompt, model, effort, maxTokens)),
   });
 
   if (!response.ok) {
@@ -461,14 +598,122 @@ async function callAnthropic(
     throw new Error(`Anthropic API error (${response.status}): ${errorText}`);
   }
 
-  const data = await response.json() as {
-    content?: Array<{ type?: string; text?: string }>;
+  const data = await response.json() as { content?: Array<{ type?: string; text?: string }> };
+
+  return extractAnthropicText(data);
+}
+
+async function callAnthropicBatch(
+  prompts: string[],
+  apiKey: string,
+  model: string,
+  effort: AnthropicEffort,
+  maxTokens: number
+): Promise<string[]> {
+  if (prompts.length === 0) return [];
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-api-key': apiKey,
+    'anthropic-version': '2023-06-01',
   };
 
-  return data.content
-    ?.filter(item => item.type === 'text' && typeof item.text === 'string')
-    .map(item => item.text)
-    .join('\n') || '';
+  const createResponse = await fetch(ANTHROPIC_BATCHES_API_URL, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      requests: prompts.map((prompt, index) => ({
+        custom_id: `request-${index}`,
+        params: buildAnthropicMessageParams(prompt, model, effort, maxTokens),
+      })),
+    }),
+  });
+
+  if (!createResponse.ok) {
+    const errorText = await createResponse.text().catch(() => 'Unknown error');
+    throw new Error(`Anthropic batch create error (${createResponse.status}): ${errorText}`);
+  }
+
+  let batch = await createResponse.json() as {
+    id?: string;
+    processing_status?: string;
+    results_url?: string;
+    request_counts?: { succeeded?: number; errored?: number; canceled?: number; expired?: number };
+  };
+
+  if (!batch.id) {
+    throw new Error('Anthropic batch create response did not include an id');
+  }
+
+  console.log(`[digest] Anthropic batch ${batch.id} created (${prompts.length} requests)`);
+
+  const deadline = Date.now() + ANTHROPIC_BATCH_POLL_TIMEOUT_MS;
+  while (batch.processing_status !== 'ended') {
+    if (Date.now() > deadline) {
+      throw new Error(`Anthropic batch ${batch.id} timed out after ${ANTHROPIC_BATCH_POLL_TIMEOUT_MS / 60_000} minutes`);
+    }
+
+    await sleep(ANTHROPIC_BATCH_POLL_INTERVAL_MS);
+
+    const statusResponse = await fetch(`${ANTHROPIC_BATCHES_API_URL}/${batch.id}`, { headers });
+    if (!statusResponse.ok) {
+      const errorText = await statusResponse.text().catch(() => 'Unknown error');
+      throw new Error(`Anthropic batch status error (${statusResponse.status}): ${errorText}`);
+    }
+    batch = await statusResponse.json() as typeof batch;
+
+    const counts = batch.request_counts;
+    const progress = counts ? ` (${counts.succeeded || 0} succeeded, ${counts.errored || 0} errored, ${counts.canceled || 0} canceled, ${counts.expired || 0} expired)` : '';
+    console.log(`[digest] Anthropic batch ${batch.id}: ${batch.processing_status}${progress}`);
+  }
+
+  if (!batch.results_url) {
+    throw new Error(`Anthropic batch ${batch.id} ended without a results URL`);
+  }
+
+  const resultsUrl = batch.results_url.startsWith('http')
+    ? batch.results_url
+    : `https://api.anthropic.com${batch.results_url}`;
+  const resultsResponse = await fetch(resultsUrl, { headers });
+  if (!resultsResponse.ok) {
+    const errorText = await resultsResponse.text().catch(() => 'Unknown error');
+    throw new Error(`Anthropic batch results error (${resultsResponse.status}): ${errorText}`);
+  }
+
+  const outputs = new Array<string>(prompts.length).fill('');
+  const errors: string[] = [];
+  const resultsText = await resultsResponse.text();
+
+  for (const line of resultsText.split('\n')) {
+    if (!line.trim()) continue;
+    const item = JSON.parse(line) as {
+      custom_id?: string;
+      result?: {
+        type?: string;
+        message?: { content?: Array<{ type?: string; text?: string }> };
+        error?: { type?: string; message?: string };
+      };
+    };
+
+    const index = Number((item.custom_id || '').replace(/^request-/, ''));
+    if (!Number.isInteger(index) || index < 0 || index >= outputs.length) {
+      errors.push(`unexpected custom_id=${item.custom_id || 'missing'}`);
+      continue;
+    }
+
+    if (item.result?.type === 'succeeded' && item.result.message) {
+      outputs[index] = extractAnthropicText(item.result.message);
+    } else {
+      const error = item.result?.error;
+      errors.push(`${item.custom_id}: ${error?.type || item.result?.type || 'unknown'} ${error?.message || ''}`.trim());
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Anthropic batch failed requests: ${errors.join('; ')}`);
+  }
+
+  return outputs;
 }
 
 async function callGemini(prompt: string, apiKey: string): Promise<string> {
@@ -567,6 +812,7 @@ function createAIClient(config: {
   anthropicModel?: string;
   anthropicEffort?: string;
   anthropicMaxTokens?: number;
+  anthropicBatch?: boolean;
   geminiApiKey?: string;
   openaiApiKey?: string;
   openaiApiBase?: string;
@@ -577,6 +823,7 @@ function createAIClient(config: {
     anthropicModel: config.anthropicModel?.trim() || ANTHROPIC_DEFAULT_MODEL,
     anthropicEffort: resolveAnthropicEffort(config.anthropicEffort),
     anthropicMaxTokens: config.anthropicMaxTokens || ANTHROPIC_DEFAULT_MAX_TOKENS,
+    anthropicBatch: config.anthropicBatch ?? ANTHROPIC_DEFAULT_BATCH,
     geminiApiKey: config.geminiApiKey?.trim() || '',
     openaiApiKey: config.openaiApiKey?.trim() || '',
     openaiApiBase: (config.openaiApiBase?.trim() || OPENAI_DEFAULT_API_BASE).replace(/\/+$/, ''),
@@ -592,6 +839,11 @@ function createAIClient(config: {
 
   return {
     async call(prompt: string): Promise<string> {
+      if (state.anthropicBatch && state.anthropicEnabled && state.anthropicApiKey) {
+        const [result] = await this.callBatch([prompt]);
+        return result || '';
+      }
+
       if (state.anthropicEnabled && state.anthropicApiKey) {
         try {
           return await callAnthropic(
@@ -638,6 +890,35 @@ function createAIClient(config: {
 
       throw new Error('No AI API key configured. Set ANTHROPIC_API_KEY, GEMINI_API_KEY, and/or OPENAI_API_KEY.');
     },
+
+    async callBatch(prompts: string[]): Promise<string[]> {
+      if (prompts.length === 0) return [];
+
+      if (state.anthropicBatch && state.anthropicEnabled && state.anthropicApiKey) {
+        try {
+          return await callAnthropicBatch(
+            prompts,
+            state.anthropicApiKey,
+            state.anthropicModel,
+            state.anthropicEffort,
+            state.anthropicMaxTokens
+          );
+        } catch (error) {
+          if (state.geminiApiKey || state.openaiApiKey) {
+            if (!state.fallbackLogged) {
+              const reason = error instanceof Error ? error.message : String(error);
+              console.warn(`[digest] Anthropic batch failed, switching to fallback provider. Reason: ${reason}`);
+              state.fallbackLogged = true;
+            }
+            state.anthropicEnabled = false;
+          } else {
+            throw error;
+          }
+        }
+      }
+
+      return Promise.all(prompts.map(prompt => this.call(prompt)));
+    },
   };
 }
 
@@ -648,6 +929,60 @@ function parseJsonResponse<T>(text: string): T {
     jsonText = jsonText.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
   }
   return JSON.parse(jsonText) as T;
+}
+
+function countTermMatches(text: string, terms: string[]): number {
+  const normalized = text.toLowerCase();
+  return terms.reduce((count, term) => count + (normalized.includes(term.toLowerCase()) ? 1 : 0), 0);
+}
+
+function calculateSelectionScore(
+  article: Article,
+  score: { relevance: number; quality: number; timeliness: number; category: CategoryId; keywords: string[] }
+): number {
+  const baseScore = score.relevance + score.quality + score.timeliness;
+  const text = `${article.sourceName} ${article.title} ${article.description} ${score.keywords.join(' ')}`;
+  const technicalMatches = countTermMatches(text, TECHNICAL_AI_INFRA_TERMS);
+  const lowValueMatches = countTermMatches(text, LOW_VALUE_TOPIC_TERMS);
+  const sourceBoost = TECHNICAL_AI_INFRA_SOURCES.has(article.sourceName) ? 4 : 0;
+  const technicalBoost = Math.min(8, technicalMatches * 2);
+  const lowValuePenalty = Math.min(8, lowValueMatches * 2);
+
+  return baseScore
+    + AI_INFRA_CATEGORY_BOOST[score.category]
+    + sourceBoost
+    + technicalBoost
+    - lowValuePenalty;
+}
+
+function isQualitySelectionCandidate(candidate: RankedArticle): boolean {
+  const { breakdown } = candidate;
+  if (candidate.selectionScore < MIN_OUTPUT_SELECTION_SCORE) return false;
+  if (breakdown.relevance < MIN_OUTPUT_RELEVANCE_SCORE) return false;
+  if (breakdown.quality < MIN_OUTPUT_QUALITY_SCORE) return false;
+
+  if (TARGET_OUTPUT_CATEGORIES.has(breakdown.category)) return true;
+
+  const text = `${candidate.sourceName} ${candidate.title} ${candidate.description} ${breakdown.keywords.join(' ')}`;
+  const technicalMatches = countTermMatches(text, TECHNICAL_AI_INFRA_TERMS);
+  const sourceMatches = TECHNICAL_AI_INFRA_SOURCES.has(candidate.sourceName);
+
+  if (breakdown.category === 'ai-ml') {
+    return sourceMatches || technicalMatches >= 2;
+  }
+
+  if (breakdown.category === 'tools') {
+    return technicalMatches >= 2 && (sourceMatches || breakdown.relevance >= 8);
+  }
+
+  return false;
+}
+
+function selectQualityArticles(candidates: RankedArticle[], topN: number): RankedArticle[] {
+  return [...candidates]
+    .filter(candidate => isQualitySelectionCandidate(candidate))
+    .sort((a, b) => b.selectionScore - a.selectionScore)
+    .slice(0, topN);
 }
 
 // ============================================================================
@@ -663,13 +998,22 @@ function buildScoringPrompt(articles: Array<{ index: number; title: string; desc
 
 Score each article on three dimensions from 1 to 10, where 10 is best. Assign one category and extract 2 to 4 concise English keywords for each article.
 
+## Audience Priority
+
+The reader values deep technical AI infrastructure content. Strongly prioritize:
+- production AI infrastructure, GPU clusters, model serving, deployment, reliability, and observability
+- inference performance, latency, throughput, batching, KV cache, quantization, speculative decoding, and schedulers
+- CUDA/Triton/GPU kernels, PyTorch internals, vLLM runtime updates, and systems-level AI performance work
+
+Deprioritize policy/regulation/legal stories, industry drama, company politics, opinion essays, career/culture posts, general software engineering, and general security news. Include security only when it directly affects AI infrastructure, model serving, GPU runtimes, PyTorch/vLLM, or production ML systems.
+
 ## Scoring Dimensions
 
 ### 1. Relevance
-- 10: A major event, breakthrough, or idea most technical readers should know
-- 7-9: Valuable to many technical practitioners
-- 4-6: Valuable to a specific technical niche
-- 1-3: Weakly related to technology or software
+- 10: Deep technical AI infrastructure, inference performance, CUDA/Triton kernels, PyTorch internals, vLLM, or production model-serving work
+- 7-9: Useful AI systems work, LLM runtime, distributed training/serving, or performance analysis
+- 4-6: General software engineering or AI/ML content without strong infrastructure depth
+- 1-3: Policy, regulation, legal, opinion, security, culture, broad industry news, or general software engineering without direct AI infrastructure value
 
 ### 2. Quality
 - 10: Deep analysis, original insight, strong evidence
@@ -684,7 +1028,7 @@ Score each article on three dimensions from 1 to 10, where 10 is best. Assign on
 - 1-3: Outdated or not time-sensitive
 
 ## Categories
-Choose exactly one. Prefer the most specific specialized category when there is overlap with AI / ML, engineering, or tools.
+Choose exactly one. Prefer the most specific specialized category when there is overlap with AI / ML or tools.
 
 - ai-ml: general AI, machine learning, LLMs, model research, evaluation, datasets, or deep learning that does not primarily focus on infrastructure or runtime systems
 - ai-infra: AI infrastructure for production systems, GPU clusters, distributed training or serving platforms, model deployment, orchestration, observability, reliability, data/model pipelines, or model serving operations
@@ -692,9 +1036,8 @@ Choose exactly one. Prefer the most specific specialized category when there is 
 - cuda-kernels: CUDA, Triton, GPU kernels, warp-level programming, memory coalescing, tensor cores, FlashAttention-style kernels, cuDNN/cuBLAS, kernel fusion, or GPU profiling and optimization
 - pytorch-ecosystem: PyTorch core, torch.compile, TorchInductor, ATen, torchao, torchtune, torchvision, torchtext, PyTorch distributed, PyTorch ecosystem projects, or PyTorch release updates
 - vllm-updates: vLLM releases, vLLM internals, PagedAttention, vLLM model support, vLLM scheduler/runtime changes, vLLM plugins, vLLM benchmarks, or vLLM community updates
-- security: security, privacy, vulnerabilities, or cryptography
-- engineering: software engineering, architecture, programming languages, or systems
-- tools: developer tools, open-source projects, libraries, or framework releases
+- security: security, privacy, vulnerabilities, or cryptography that directly affects AI infrastructure, model serving, GPU runtimes, PyTorch/vLLM, or production ML systems
+- tools: developer tools, open-source projects, libraries, or framework releases that directly affect AI infrastructure, model serving, PyTorch/vLLM/CUDA, or production ML workflows
 - opinion: industry analysis, personal essays, career topics, or culture
 - other: none of the above
 
@@ -710,8 +1053,8 @@ Return strict JSON only. Do not include markdown code fences or any other text:
       "relevance": 8,
       "quality": 7,
       "timeliness": 9,
-      "category": "engineering",
-      "keywords": ["Rust", "compiler", "performance"]
+      "category": "inference-performance",
+      "keywords": ["batching", "latency", "model serving"]
     }
   ]
 }`;
@@ -738,13 +1081,21 @@ async function scoreArticlesWithAI(
   console.log(`[digest] AI scoring: ${articles.length} articles in ${batches.length} batches`);
   
   const validCategories = new Set<string>(Object.keys(CATEGORY_META));
-  
-  for (let i = 0; i < batches.length; i += MAX_CONCURRENT_GEMINI) {
-    const batchGroup = batches.slice(i, i + MAX_CONCURRENT_GEMINI);
-    const promises = batchGroup.map(async (batch) => {
+
+  const setDefaultScores = (batch: typeof indexed) => {
+    for (const item of batch) {
+      allScores.set(item.index, { relevance: 5, quality: 5, timeliness: 5, category: 'other', keywords: [] });
+    }
+  };
+
+  try {
+    const prompts = batches.map(batch => buildScoringPrompt(batch));
+    const responseTexts = await aiClient.callBatch(prompts);
+
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i]!;
       try {
-        const prompt = buildScoringPrompt(batch);
-        const responseText = await aiClient.call(prompt);
+        const responseText = responseTexts[i] || '';
         const parsed = parseJsonResponse<GeminiScoringResult>(responseText);
         
         if (parsed.results && Array.isArray(parsed.results)) {
@@ -762,15 +1113,17 @@ async function scoreArticlesWithAI(
         }
       } catch (error) {
         console.warn(`[digest] Scoring batch failed: ${error instanceof Error ? error.message : String(error)}`);
-        for (const item of batch) {
-          allScores.set(item.index, { relevance: 5, quality: 5, timeliness: 5, category: 'other', keywords: [] });
-        }
+        setDefaultScores(batch);
       }
-    });
-    
-    await Promise.all(promises);
-    console.log(`[digest] Scoring progress: ${Math.min(i + MAX_CONCURRENT_GEMINI, batches.length)}/${batches.length} batches`);
+    }
+  } catch (error) {
+    console.warn(`[digest] Scoring request failed: ${error instanceof Error ? error.message : String(error)}`);
+    for (const batch of batches) {
+      setDefaultScores(batch);
+    }
   }
+
+  console.log(`[digest] Scoring progress: ${batches.length}/${batches.length} batches`);
   
   return allScores;
 }
@@ -845,13 +1198,21 @@ async function summarizeArticles(
   }
   
   console.log(`[digest] Generating summaries for ${articles.length} articles in ${batches.length} batches`);
-  
-  for (let i = 0; i < batches.length; i += MAX_CONCURRENT_GEMINI) {
-    const batchGroup = batches.slice(i, i + MAX_CONCURRENT_GEMINI);
-    const promises = batchGroup.map(async (batch) => {
+
+  const setDefaultSummaries = (batch: typeof indexed) => {
+    for (const item of batch) {
+      summaries.set(item.index, { displayTitle: item.title, summary: item.title, reason: '' });
+    }
+  };
+
+  try {
+    const prompts = batches.map(batch => buildSummaryPrompt(batch, lang));
+    const responseTexts = await aiClient.callBatch(prompts);
+
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i]!;
       try {
-        const prompt = buildSummaryPrompt(batch, lang);
-        const responseText = await aiClient.call(prompt);
+        const responseText = responseTexts[i] || '';
         const parsed = parseJsonResponse<GeminiSummaryResult>(responseText);
         
         if (parsed.results && Array.isArray(parsed.results)) {
@@ -865,15 +1226,17 @@ async function summarizeArticles(
         }
       } catch (error) {
         console.warn(`[digest] Summary batch failed: ${error instanceof Error ? error.message : String(error)}`);
-        for (const item of batch) {
-          summaries.set(item.index, { displayTitle: item.title, summary: item.title, reason: '' });
-        }
+        setDefaultSummaries(batch);
       }
-    });
-    
-    await Promise.all(promises);
-    console.log(`[digest] Summary progress: ${Math.min(i + MAX_CONCURRENT_GEMINI, batches.length)}/${batches.length} batches`);
+    }
+  } catch (error) {
+    console.warn(`[digest] Summary request failed: ${error instanceof Error ? error.message : String(error)}`);
+    for (const batch of batches) {
+      setDefaultSummaries(batch);
+    }
   }
+
+  console.log(`[digest] Summary progress: ${batches.length}/${batches.length} batches`);
   
   return summaries;
 }
@@ -903,11 +1266,11 @@ ${langNote}
 Articles:
 ${articleList}
 
-Return plain text only. Do not return JSON or markdown.`;
+  Return plain text only. Do not return JSON or markdown.`;
 
   try {
-    const text = await aiClient.call(prompt);
-    return text.trim();
+    const [text] = await aiClient.callBatch([prompt]);
+    return (text || '').trim();
   } catch (error) {
     console.warn(`[digest] Highlights generation failed: ${error instanceof Error ? error.message : String(error)}`);
     return '';
@@ -1032,6 +1395,10 @@ function generateTagCloud(articles: ScoredArticle[]): string {
     .join(' · ');
 }
 
+function escapeMarkdownTableCell(value: string): string {
+  return value.replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+}
+
 // ============================================================================
 // Report Generation
 // ============================================================================
@@ -1043,6 +1410,7 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
   filteredArticles: number;
   hours: number;
   lang: string;
+  failedFeeds: FeedFailure[];
 }): string {
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0];
@@ -1085,6 +1453,16 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
   report += `| Feeds | Articles | Time Range | Selected |\n`;
   report += `|:---:|:---:|:---:|:---:|\n`;
   report += `| ${stats.successFeeds}/${stats.totalFeeds} | ${stats.totalArticles} -> ${stats.filteredArticles} | ${stats.hours}h | **${articles.length}** |\n\n`;
+
+  if (stats.failedFeeds.length > 0) {
+    report += `## Failed Feeds\n\n`;
+    report += `| Source | Issue | Feed URL |\n`;
+    report += `|---|---|---|\n`;
+    for (const failure of stats.failedFeeds) {
+      report += `| ${escapeMarkdownTableCell(failure.name)} | ${escapeMarkdownTableCell(failure.reason)} | <${failure.xmlUrl}> |\n`;
+    }
+    report += `\n`;
+  }
 
   const pieChart = generateCategoryPieChart(articles);
   if (pieChart) {
@@ -1158,7 +1536,7 @@ Usage:
 
 Options:
   --hours <n>     Time range in hours (default: 48)
-  --top-n <n>     Number of top articles to include (default: ${DEFAULT_TOP_N})
+  --top-n <n>     Maximum articles to include after quality filtering (default: ${DEFAULT_TOP_N})
   --lang <lang>   Summary language: en (default: en)
   --output <path> Output file path (default: ./digest-YYYYMMDD.md)
   --help          Show this help
@@ -1168,13 +1546,14 @@ Environment:
   ANTHROPIC_MODEL   Optional Anthropic model (default: ${ANTHROPIC_DEFAULT_MODEL})
   ANTHROPIC_EFFORT  Optional Anthropic effort: low, medium, high, xhigh, max (default: ${ANTHROPIC_DEFAULT_EFFORT})
   ANTHROPIC_MAX_TOKENS Optional Anthropic max_tokens (default: ${ANTHROPIC_DEFAULT_MAX_TOKENS})
+  ANTHROPIC_BATCH   Optional Anthropic Message Batches mode: true/false (default: ${ANTHROPIC_DEFAULT_BATCH})
   GEMINI_API_KEY    Optional fallback key. Get one at https://aistudio.google.com/apikey
   OPENAI_API_KEY    Optional fallback key for OpenAI-compatible APIs
   OPENAI_API_BASE   Optional fallback base URL (default: https://api.openai.com/v1)
   OPENAI_MODEL      Optional fallback model (default: deepseek-chat for DeepSeek base, else gpt-4o-mini)
 
 Examples:
-  bun scripts/digest.ts --hours 24 --top-n 25 --lang en
+  ANTHROPIC_BATCH=true bun scripts/digest.ts --hours 24 --top-n 25 --lang en
   bun scripts/digest.ts --hours 72 --top-n 25 --lang en --output ./my-digest.md
 `);
   process.exit(0);
@@ -1207,6 +1586,7 @@ async function main(): Promise<void> {
   const anthropicModel = process.env.ANTHROPIC_MODEL;
   const anthropicEffort = process.env.ANTHROPIC_EFFORT;
   const anthropicMaxTokens = process.env.ANTHROPIC_MAX_TOKENS ? parseInt(process.env.ANTHROPIC_MAX_TOKENS, 10) : undefined;
+  const anthropicBatch = parseBooleanEnv(process.env.ANTHROPIC_BATCH, ANTHROPIC_DEFAULT_BATCH);
   const geminiApiKey = process.env.GEMINI_API_KEY;
   const openaiApiKey = process.env.OPENAI_API_KEY;
   const openaiApiBase = process.env.OPENAI_API_BASE;
@@ -1223,6 +1603,7 @@ async function main(): Promise<void> {
     anthropicModel,
     anthropicEffort,
     anthropicMaxTokens,
+    anthropicBatch,
     geminiApiKey,
     openaiApiKey,
     openaiApiBase,
@@ -1239,7 +1620,7 @@ async function main(): Promise<void> {
   console.log(`[digest] Top N: ${topN}`);
   console.log(`[digest] Language: ${lang}`);
   console.log(`[digest] Output: ${outputPath}`);
-  console.log(`[digest] AI provider: ${anthropicApiKey ? `Anthropic (primary, model=${anthropicModel?.trim() || ANTHROPIC_DEFAULT_MODEL}, effort=${resolveAnthropicEffort(anthropicEffort)})` : geminiApiKey ? 'Gemini (primary)' : 'OpenAI-compatible (primary)'}`);
+  console.log(`[digest] AI provider: ${anthropicApiKey ? `Anthropic (primary, model=${anthropicModel?.trim() || ANTHROPIC_DEFAULT_MODEL}, effort=${resolveAnthropicEffort(anthropicEffort)}, batch=${anthropicBatch ? 'on' : 'off'})` : geminiApiKey ? 'Gemini (primary)' : 'OpenAI-compatible (primary)'}`);
   if (openaiApiKey) {
     const resolvedBase = (openaiApiBase?.trim() || OPENAI_DEFAULT_API_BASE).replace(/\/+$/, '');
     const resolvedModel = openaiModel?.trim() || inferOpenAIModel(resolvedBase);
@@ -1248,7 +1629,8 @@ async function main(): Promise<void> {
   console.log('');
   
   console.log(`[digest] Step 1/5: Fetching ${RSS_FEEDS.length} RSS feeds...`);
-  const allArticles = await fetchAllFeeds(RSS_FEEDS);
+  const feedSummary = await fetchAllFeeds(RSS_FEEDS);
+  const allArticles = feedSummary.articles;
   
   if (allArticles.length === 0) {
     console.error('[digest] Error: No articles fetched from any feed. Check network connection.');
@@ -1270,19 +1652,27 @@ async function main(): Promise<void> {
   console.log(`[digest] Step 3/5: AI scoring ${recentArticles.length} articles...`);
   const scores = await scoreArticlesWithAI(recentArticles, aiClient);
   
-  const scoredArticles = recentArticles.map((article, index) => {
+  const scoredArticles: RankedArticle[] = recentArticles.map((article, index) => {
     const score = scores.get(index) || { relevance: 5, quality: 5, timeliness: 5, category: 'other' as CategoryId, keywords: [] };
+    const baseScore = score.relevance + score.quality + score.timeliness;
+    const selectionScore = calculateSelectionScore(article, score);
     return {
       ...article,
-      totalScore: score.relevance + score.quality + score.timeliness,
+      totalScore: baseScore,
+      selectionScore,
       breakdown: score,
     };
   });
   
-  scoredArticles.sort((a, b) => b.totalScore - a.totalScore);
-  const topArticles = scoredArticles.slice(0, topN);
+  const topArticles = selectQualityArticles(scoredArticles, topN);
+  const scoreRange = topArticles.length > 0
+    ? `${topArticles[topArticles.length - 1]!.selectionScore} - ${topArticles[0]!.selectionScore}`
+    : 'none';
   
-  console.log(`[digest] Top ${topN} articles selected (score range: ${topArticles[topArticles.length - 1]?.totalScore || 0} - ${topArticles[0]?.totalScore || 0})`);
+  console.log(`[digest] ${topArticles.length}/${topN} quality articles selected after AI infra filtering (selection score range: ${scoreRange})`);
+  if (topArticles.length === 0) {
+    console.warn('[digest] No articles met the quality threshold; writing a digest with stats and failed-feed data only.');
+  }
   
   console.log(`[digest] Step 4/5: Generating AI summaries...`);
   const indexedTopArticles = topArticles.map((a, i) => ({ ...a, index: i }));
@@ -1298,6 +1688,7 @@ async function main(): Promise<void> {
       sourceName: a.sourceName,
       sourceUrl: a.sourceUrl,
       score: a.totalScore,
+      selectionScore: a.selectionScore,
       scoreBreakdown: {
         relevance: a.breakdown.relevance,
         quality: a.breakdown.quality,
@@ -1312,17 +1703,18 @@ async function main(): Promise<void> {
   });
   
   console.log(`[digest] Step 5/5: Generating today's highlights...`);
-  const highlights = await generateHighlights(finalArticles, aiClient, lang);
-  
-  const successfulSources = new Set(allArticles.map(a => a.sourceName));
+  const highlights = finalArticles.length > 0
+    ? await generateHighlights(finalArticles, aiClient, lang)
+    : '';
   
   const report = generateDigestReport(finalArticles, highlights, {
     totalFeeds: RSS_FEEDS.length,
-    successFeeds: successfulSources.size,
+    successFeeds: feedSummary.successCount,
     totalArticles: allArticles.length,
     filteredArticles: recentArticles.length,
     hours,
     lang,
+    failedFeeds: feedSummary.failedFeeds,
   });
   
   await mkdir(dirname(outputPath), { recursive: true });
@@ -1331,7 +1723,7 @@ async function main(): Promise<void> {
   console.log('');
   console.log(`[digest] ✅ Done!`);
   console.log(`[digest] 📁 Report: ${outputPath}`);
-  console.log(`[digest] 📊 Stats: ${successfulSources.size} sources -> ${allArticles.length} articles -> ${recentArticles.length} recent -> ${finalArticles.length} selected`);
+  console.log(`[digest] 📊 Stats: ${feedSummary.successCount} sources -> ${allArticles.length} articles -> ${recentArticles.length} recent -> ${finalArticles.length} selected (${feedSummary.failCount} failed feeds)`);
   
   if (finalArticles.length > 0) {
     console.log('');

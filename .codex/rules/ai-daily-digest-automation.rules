@@ -1,0 +1,13 @@
+prefix_rule(
+    pattern = ["/Users/dongw/.bun/bin/bun", "scripts/run-digest-automation.ts"],
+    decision = "allow",
+    justification = "Allow the scheduled AI Daily Digest automation runner to fetch feeds, call Anthropic, and write digest output without an unattended approval prompt.",
+    match = [
+        "/Users/dongw/.bun/bin/bun scripts/run-digest-automation.ts",
+        "/Users/dongw/.bun/bin/bun scripts/run-digest-automation.ts --check-config",
+    ],
+    not_match = [
+        "/Users/dongw/.bun/bin/bun scripts/digest.ts",
+        "/Users/dongw/.bun/bin/bun -e 'console.log(1)'",
+    ],
+)
