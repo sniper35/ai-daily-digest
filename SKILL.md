@@ -153,7 +153,7 @@ The generated Markdown report contains:
 1. Highlights: a 3 to 5 sentence trend summary
 2. Top reads: the top three articles with summary, reason, and keyword tags
 3. Data overview: tables, Mermaid charts, plain-text keyword chart, and tag cloud
-4. Category article lists grouped by AI/ML, security, engineering, tools/open source, opinion, and other
+4. Category article lists grouped by AI/ML, AI infra, inference performance, CUDA kernels, PyTorch ecosystem, vLLM updates, security, engineering, tools/open source, opinion, and other
 
 On failure, show the error and likely cause, such as invalid API key, network access, or feed availability.
 
@@ -180,6 +180,8 @@ On failure, show the error and likely cause, such as invalid API key, network ac
 ## Feed Sources
 
 The feed list is based on Hacker News-popular technology blogs plus selected AI and engineering sources. The full list is embedded in `scripts/digest.ts`.
+
+Specialized AI runtime coverage includes vLLM, PyTorch, NVIDIA Developer Blog, CUDA For Fun, Tri Dao, Together AI, Runpod, Anyscale, Hugging Face, and SemiAnalysis sources.
 
 ## Troubleshooting
 

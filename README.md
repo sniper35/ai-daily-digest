@@ -54,13 +54,18 @@ The generated Markdown digest includes:
 | Highlights | A short trend summary across the selected articles |
 | Top reads | A deeper showcase of the top three articles |
 | Data overview | Feed/article counts, Mermaid charts, plain-text keyword chart, and tag cloud |
-| Category lists | Articles grouped by AI/ML, security, engineering, tools/open source, opinion, and other |
+| Category lists | Articles grouped by AI/ML, AI infra, inference performance, CUDA kernels, PyTorch ecosystem, vLLM updates, security, engineering, tools/open source, opinion, and other |
 
 ## Categories
 
 | Category | Coverage |
 |---|---|
-| AI / ML | Artificial intelligence, machine learning, LLMs, and deep learning |
+| AI / ML | General artificial intelligence, machine learning, LLMs, model research, datasets, and evaluation |
+| AI Infra | GPU clusters, production model serving, deployment platforms, orchestration, observability, reliability, and data/model pipelines |
+| Inference Performance | Latency, throughput, KV cache behavior, batching, quantization, speculative decoding, prefix caching, scheduling, and cost/performance benchmarks |
+| CUDA Kernels | CUDA, Triton, GPU kernels, tensor cores, memory coalescing, FlashAttention-style kernels, kernel fusion, and GPU profiling |
+| PyTorch Ecosystem | PyTorch core, torch.compile, TorchInductor, ATen, torchao, torchtune, torchvision, distributed PyTorch, and PyTorch ecosystem releases |
+| vLLM Updates | vLLM releases, PagedAttention, model support, scheduler/runtime changes, plugins, benchmarks, and community updates |
 | Security | Security, privacy, vulnerabilities, and cryptography |
 | Engineering | Software engineering, architecture, programming languages, and systems |
 | Tools / Open Source | Developer tools, open-source projects, libraries, and framework releases |
@@ -94,4 +99,4 @@ The script selects providers in this order:
 
 ## Feed Sources
 
-The full feed list is embedded in [scripts/digest.ts](scripts/digest.ts).
+The full feed list is embedded in [scripts/digest.ts](scripts/digest.ts). Runtime and infrastructure coverage includes vLLM, PyTorch, NVIDIA Developer Blog, CUDA For Fun, Tri Dao, Together AI, Runpod, Anyscale, Hugging Face, and SemiAnalysis sources.

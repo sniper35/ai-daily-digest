@@ -123,7 +123,7 @@ const RSS_FEEDS: Array<{ name: string; xmlUrl: string; htmlUrl: string }> = [
   { name: "cudaforfun.substack.com", xmlUrl: "https://cudaforfun.substack.com/feed", htmlUrl: "https://cudaforfun.substack.com" },
   { name: "veitner.bearblog.dev", xmlUrl: "https://veitner.bearblog.dev/feed/", htmlUrl: "https://veitner.bearblog.dev" },
   { name: "blog.eleuther.ai", xmlUrl: "https://blog.eleuther.ai/index.xml", htmlUrl: "https://blog.eleuther.ai" },
-  { name: "blog.vllm.ai", xmlUrl: "https://vllm.ai/blog/rss.xml", htmlUrl: "https://blog.vllm.ai" },
+  { name: "vllm.ai", xmlUrl: "https://vllm.ai/blog/rss.xml", htmlUrl: "https://vllm.ai/blog" },
   { name: "dustintran.com", xmlUrl: "https://dustintran.com/blog/feed.xml", htmlUrl: "https://dustintran.com" },
   { name: "aleksagordic.com", xmlUrl: "https://www.aleksagordic.com/feed.xml", htmlUrl: "https://www.aleksagordic.com" },
   { name: "blog.edward-li.com", xmlUrl: "https://blog.edward-li.com/index.xml", htmlUrl: "https://blog.edward-li.com" },
@@ -134,6 +134,7 @@ const RSS_FEEDS: Array<{ name: string; xmlUrl: string; htmlUrl: string }> = [
   { name: "fkong.tech", xmlUrl: "https://fkong.tech/index.xml", htmlUrl: "https://fkong.tech" },
   { name: "pytorch.org", xmlUrl: "https://pytorch.org/feed/", htmlUrl: "https://pytorch.org" },
   { name: "anyscale.com", xmlUrl: "https://www.anyscale.com/rss.xml", htmlUrl: "https://www.anyscale.com" },
+  { name: "together.ai", xmlUrl: "https://www.together.ai/blog/rss.xml", htmlUrl: "https://www.together.ai/blog" },
   { name: "cursor.com", xmlUrl: "https://cursor.com/atom.xml", htmlUrl: "https://www.cursor.com" },
   { name: "danielvegamyhre.github.io", xmlUrl: "https://danielvegamyhre.github.io/feed.xml", htmlUrl: "https://danielvegamyhre.github.io" },
   { name: "goyalpramod.github.io", xmlUrl: "https://goyalpramod.github.io/feed.xml", htmlUrl: "https://goyalpramod.github.io" },
@@ -160,18 +161,34 @@ const RSS_FEEDS: Array<{ name: string; xmlUrl: string; htmlUrl: string }> = [
 // Types
 // ============================================================================
 
-type CategoryId = 'ai-ml' | 'security' | 'engineering' | 'tools' | 'opinion' | 'other';
+type CategoryId =
+  | 'ai-ml'
+  | 'ai-infra'
+  | 'inference-performance'
+  | 'cuda-kernels'
+  | 'pytorch-ecosystem'
+  | 'vllm-updates'
+  | 'security'
+  | 'engineering'
+  | 'tools'
+  | 'opinion'
+  | 'other';
 type AnthropicEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 type AnthropicApiEffort = Exclude<AnthropicEffort, 'xhigh'>;
 type OutputLanguage = 'en';
 
 const CATEGORY_META: Record<CategoryId, { emoji: string; label: string }> = {
-  'ai-ml':       { emoji: '🤖', label: 'AI / ML' },
-  'security':    { emoji: '🔒', label: 'Security' },
-  'engineering': { emoji: '⚙️', label: 'Engineering' },
-  'tools':       { emoji: '🛠', label: 'Tools / Open Source' },
-  'opinion':     { emoji: '💡', label: 'Opinion' },
-  'other':       { emoji: '📝', label: 'Other' },
+  'ai-ml':                 { emoji: '🤖', label: 'AI / ML' },
+  'ai-infra':              { emoji: '🏗️', label: 'AI Infra' },
+  'inference-performance': { emoji: '🚀', label: 'Inference Performance' },
+  'cuda-kernels':          { emoji: '🧮', label: 'CUDA Kernels' },
+  'pytorch-ecosystem':     { emoji: '🔥', label: 'PyTorch Ecosystem' },
+  'vllm-updates':          { emoji: '⚡', label: 'vLLM Updates' },
+  'security':              { emoji: '🔒', label: 'Security' },
+  'engineering':           { emoji: '⚙️', label: 'Engineering' },
+  'tools':                 { emoji: '🛠', label: 'Tools / Open Source' },
+  'opinion':               { emoji: '💡', label: 'Opinion' },
+  'other':                 { emoji: '📝', label: 'Other' },
 };
 
 interface Article {
@@ -667,8 +684,14 @@ Score each article on three dimensions from 1 to 10, where 10 is best. Assign on
 - 1-3: Outdated or not time-sensitive
 
 ## Categories
-Choose exactly one:
-- ai-ml: AI, machine learning, LLMs, or deep learning
+Choose exactly one. Prefer the most specific specialized category when there is overlap with AI / ML, engineering, or tools.
+
+- ai-ml: general AI, machine learning, LLMs, model research, evaluation, datasets, or deep learning that does not primarily focus on infrastructure or runtime systems
+- ai-infra: AI infrastructure for production systems, GPU clusters, distributed training or serving platforms, model deployment, orchestration, observability, reliability, data/model pipelines, or model serving operations
+- inference-performance: inference latency, throughput, serving efficiency, KV cache behavior, batching, quantization, speculative decoding, prefix caching, disaggregated prefill/decode, routing, scheduling, or cost/performance benchmarks
+- cuda-kernels: CUDA, Triton, GPU kernels, warp-level programming, memory coalescing, tensor cores, FlashAttention-style kernels, cuDNN/cuBLAS, kernel fusion, or GPU profiling and optimization
+- pytorch-ecosystem: PyTorch core, torch.compile, TorchInductor, ATen, torchao, torchtune, torchvision, torchtext, PyTorch distributed, PyTorch ecosystem projects, or PyTorch release updates
+- vllm-updates: vLLM releases, vLLM internals, PagedAttention, vLLM model support, vLLM scheduler/runtime changes, vLLM plugins, vLLM benchmarks, or vLLM community updates
 - security: security, privacy, vulnerabilities, or cryptography
 - engineering: software engineering, architecture, programming languages, or systems
 - tools: developer tools, open-source projects, libraries, or framework releases
@@ -714,7 +737,7 @@ async function scoreArticlesWithAI(
   
   console.log(`[digest] AI scoring: ${articles.length} articles in ${batches.length} batches`);
   
-  const validCategories = new Set<string>(['ai-ml', 'security', 'engineering', 'tools', 'opinion', 'other']);
+  const validCategories = new Set<string>(Object.keys(CATEGORY_META));
   
   for (let i = 0; i < batches.length; i += MAX_CONCURRENT_GEMINI) {
     const batchGroup = batches.slice(i, i + MAX_CONCURRENT_GEMINI);
