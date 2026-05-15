@@ -151,9 +151,9 @@ On success, report:
 The generated Markdown report contains:
 
 1. Highlights: a 3 to 5 sentence trend summary
-2. Top reads: the top three articles with summary, reason, and keyword tags
+2. Top reads: the top three articles with summary, reason, keyword tags, and each raw original link
 3. Data overview: tables, Mermaid charts, plain-text keyword chart, and tag cloud
-4. Category article lists grouped by AI/ML, AI infra, inference performance, CUDA kernels, PyTorch ecosystem, vLLM updates, security, engineering, tools/open source, opinion, and other
+4. Category article lists grouped by AI/ML, AI infra, inference performance, CUDA kernels, PyTorch ecosystem, vLLM updates, security, engineering, tools/open source, opinion, and other, with each raw original link shown
 
 On failure, show the error and likely cause, such as invalid API key, network access, or feed availability.
 

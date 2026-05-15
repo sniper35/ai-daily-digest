@@ -52,9 +52,9 @@ The generated Markdown digest includes:
 | Section | Contents |
 |---|---|
 | Highlights | A short trend summary across the selected articles |
-| Top reads | A deeper showcase of the top three articles |
+| Top reads | A deeper showcase of the top three articles, including each raw original link |
 | Data overview | Feed/article counts, Mermaid charts, plain-text keyword chart, and tag cloud |
-| Category lists | Articles grouped by AI/ML, AI infra, inference performance, CUDA kernels, PyTorch ecosystem, vLLM updates, security, engineering, tools/open source, opinion, and other |
+| Category lists | Articles grouped by AI/ML, AI infra, inference performance, CUDA kernels, PyTorch ecosystem, vLLM updates, security, engineering, tools/open source, opinion, and other, with each raw original link shown |
 
 ## Categories
 

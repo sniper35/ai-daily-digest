@@ -1067,6 +1067,7 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
       
       report += `${medal} **${a.displayTitle || a.title}**\n\n`;
       report += `[${a.title}](${a.link}) — ${a.sourceName} · ${humanizeTime(a.pubDate)} · ${catMeta.emoji} ${catMeta.label}\n\n`;
+      report += `Original link: <${a.link}>\n\n`;
       report += `> ${a.summary}\n\n`;
       if (a.reason) {
         report += `💡 **Why it matters**: ${a.reason}\n\n`;
@@ -1129,6 +1130,7 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
 
       report += `### ${globalIndex}. ${a.displayTitle || a.title}\n\n`;
       report += `[${a.title}](${a.link}) — **${a.sourceName}** · ${humanizeTime(a.pubDate)} · ⭐ ${scoreTotal}/30\n\n`;
+      report += `Original link: <${a.link}>\n\n`;
       report += `> ${a.summary}\n\n`;
       if (a.keywords.length > 0) {
         report += `🏷️ ${a.keywords.join(', ')}\n\n`;
