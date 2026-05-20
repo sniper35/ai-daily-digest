@@ -76,10 +76,11 @@ describe("digest category coverage", () => {
     expect(originalLinkMentions).toHaveLength(2);
   });
 
-  test("reports failed feeds in the generated digest", () => {
+  test("reports failed sources in the generated digest", () => {
     expect(source).toContain("interface FeedFailure");
     expect(source).toContain("failedFeeds: FeedFailure[]");
-    expect(source).toContain("## Failed Feeds");
+    expect(source).toContain("## Failed Sources");
+    expect(source).toContain("Feed/Page URL");
     expect(source).toContain("0 parsed items");
   });
 

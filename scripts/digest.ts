@@ -1,4 +1,6 @@
-import { writeFile, mkdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { writeFile, mkdir, readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname } from 'node:path';
 import process from 'node:process';
 
@@ -20,10 +22,51 @@ const OPENAI_DEFAULT_MODEL = 'gpt-4o-mini';
 const DEFAULT_TOP_N = 25;
 const FEED_FETCH_TIMEOUT_MS = 15_000;
 const FEED_CONCURRENCY = 10;
+const TRACKED_PAGE_FETCH_TIMEOUT_MS = 15_000;
+const TRACKED_PAGE_CONCURRENCY = 5;
+const TRACKED_PAGE_STATE_PATH = process.env.TRACKED_PAGE_STATE_PATH || `${homedir()}/.hn-daily-digest/tracked-pages.json`;
 const GEMINI_BATCH_SIZE = 10;
 const MIN_OUTPUT_SELECTION_SCORE = 25;
 const MIN_OUTPUT_RELEVANCE_SCORE = 7;
 const MIN_OUTPUT_QUALITY_SCORE = 6;
+
+export interface TrackedPageSource {
+  name: string;
+  indexUrl: string;
+  htmlUrl: string;
+  includeUrlPatterns?: string[];
+  excludeUrlPatterns?: string[];
+  trackPageContent?: boolean;
+  contentTitle?: string;
+  contentDescription?: string;
+  limit?: number;
+}
+
+export interface TrackedPageCandidate {
+  title: string;
+  url: string;
+  text: string;
+  description?: string;
+}
+
+interface TrackedPageSeenLink {
+  title: string;
+  firstSeen: string;
+  lastSeen: string;
+  publishedAt?: string;
+}
+
+interface TrackedPageSourceState {
+  initializedAt?: string;
+  lastChecked?: string;
+  pageHash?: string;
+  pageFirstSeen?: string;
+  links: Record<string, TrackedPageSeenLink>;
+}
+
+export interface TrackedPageState {
+  sources?: Record<string, TrackedPageSourceState>;
+}
 
 // RSS feeds from the Hacker News Popularity Contest 2025 list plus selected additions.
 const RSS_FEEDS: Array<{ name: string; xmlUrl: string; htmlUrl: string }> = [
@@ -150,6 +193,7 @@ const RSS_FEEDS: Array<{ name: string; xmlUrl: string; htmlUrl: string }> = [
   { name: "colah.github.io", xmlUrl: "https://colah.github.io/rss.xml", htmlUrl: "https://colah.github.io" },
   { name: "gau-nernst.github.io", xmlUrl: "https://gau-nernst.github.io/index.xml", htmlUrl: "https://gau-nernst.github.io" },
   { name: "thinkingmachines.ai", xmlUrl: "https://thinkingmachines.ai/index.xml", htmlUrl: "https://thinkingmachines.ai" },
+  { name: "gaocegege.com", xmlUrl: "https://gaocegege.com/Blog/rss.xml", htmlUrl: "https://gaocegege.com/Blog" },
   { name: "tridao.me", xmlUrl: "https://tridao.me/feed.xml", htmlUrl: "https://tridao.me" },
   { name: "medium.com/@joaolages", xmlUrl: "https://medium.com/feed/@joaolages", htmlUrl: "https://medium.com/@joaolages" },
   { name: "newsletter.semianalysis.com", xmlUrl: "https://newsletter.semianalysis.com/feed", htmlUrl: "https://newsletter.semianalysis.com" },
@@ -161,6 +205,112 @@ const RSS_FEEDS: Array<{ name: string; xmlUrl: string; htmlUrl: string }> = [
   { name: "siboehm.com", xmlUrl: "https://siboehm.com/feed.xml", htmlUrl: "https://siboehm.com" },
   { name: "lilianweng.github.io", xmlUrl: "https://lilianweng.github.io/index.xml", htmlUrl: "https://lilianweng.github.io" },
   { name: "szymonozog.github.io", xmlUrl: "https://szymonozog.github.io/feed.xml", htmlUrl: "https://szymonozog.github.io" },
+];
+
+// Sites without usable RSS/Atom feeds. These are tracked by scraping configured index pages.
+export const TRACKED_PAGES: TrackedPageSource[] = [
+  {
+    name: "research.perplexity.ai",
+    indexUrl: "https://research.perplexity.ai/",
+    htmlUrl: "https://research.perplexity.ai",
+    includeUrlPatterns: ["^https://research\\.perplexity\\.ai/articles/"],
+  },
+  {
+    name: "noumena.com/research",
+    indexUrl: "https://noumena.com/research/",
+    htmlUrl: "https://noumena.com/research",
+    includeUrlPatterns: ["^https://noumena\\.com/research/\\d{4}-[^/]+/?$"],
+  },
+  {
+    name: "davekilian.com",
+    indexUrl: "https://davekilian.com/",
+    htmlUrl: "https://davekilian.com",
+    includeUrlPatterns: ["^https://davekilian\\.com/(?!about\\.html|index\\.html|resume\\.pdf)[^/]+\\.html$"],
+  },
+  {
+    name: "notes.ekzhang.com/events/nysrg",
+    indexUrl: "https://notes.ekzhang.com/events/nysrg",
+    htmlUrl: "https://notes.ekzhang.com/events/nysrg",
+    trackPageContent: true,
+    contentTitle: "NYSRG updates",
+    contentDescription: "The NYSRG event page changed since the previous digest run.",
+  },
+  {
+    name: "blog.samaltman.com",
+    indexUrl: "http://blog.samaltman.com/",
+    htmlUrl: "http://blog.samaltman.com",
+    includeUrlPatterns: ["^https?://blog\\.samaltman\\.com/[^?#]+$"],
+    excludeUrlPatterns: ["^https?://blog\\.samaltman\\.com/?$", "^https?://blog\\.samaltman\\.com/archive"],
+  },
+  {
+    name: "hazyresearch.stanford.edu/blog",
+    indexUrl: "https://hazyresearch.stanford.edu/blog",
+    htmlUrl: "https://hazyresearch.stanford.edu/blog",
+    includeUrlPatterns: ["^https://hazyresearch\\.stanford\\.edu/blog/"],
+  },
+  {
+    name: "dl.heeere.com/conditional-flow-matching",
+    indexUrl: "https://dl.heeere.com/conditional-flow-matching/blog/",
+    htmlUrl: "https://dl.heeere.com/conditional-flow-matching/blog/",
+    includeUrlPatterns: ["^https://dl\\.heeere\\.com/conditional-flow-matching/blog/(?!index\\.html$).+"],
+  },
+  {
+    name: "fireworks.ai/blog",
+    indexUrl: "https://fireworks.ai/blog",
+    htmlUrl: "https://fireworks.ai/blog",
+    includeUrlPatterns: ["^https://fireworks\\.ai/blog/"],
+  },
+  {
+    name: "lmsys.org/blog",
+    indexUrl: "https://www.lmsys.org/sitemap.xml",
+    htmlUrl: "https://www.lmsys.org/blog",
+    includeUrlPatterns: ["^https://lmsys\\.org/blog/\\d{4}-"],
+  },
+  {
+    name: "nathanchen.me",
+    indexUrl: "https://nathanchen.me/",
+    htmlUrl: "https://nathanchen.me",
+    includeUrlPatterns: ["^https://nathanchen\\.me/public/.*\\.html$"],
+  },
+  {
+    name: "anthropic.com/engineering",
+    indexUrl: "https://www.anthropic.com/engineering",
+    htmlUrl: "https://www.anthropic.com/engineering",
+    includeUrlPatterns: ["^https://www\\.anthropic\\.com/engineering/"],
+  },
+  {
+    name: "anthropic.com/research",
+    indexUrl: "https://www.anthropic.com/research",
+    htmlUrl: "https://www.anthropic.com/research",
+    includeUrlPatterns: ["^https://www\\.anthropic\\.com/(research|features)/"],
+    excludeUrlPatterns: ["^https://www\\.anthropic\\.com/research/team/"],
+  },
+  {
+    name: "sandai-org.github.io/MagiAttention",
+    indexUrl: "https://sandai-org.github.io/MagiAttention/",
+    htmlUrl: "https://sandai-org.github.io/MagiAttention/",
+    trackPageContent: true,
+    includeUrlPatterns: ["^https://sandai-org\\.github\\.io/MagiAttention/docs/"],
+    contentTitle: "MagiAttention updates",
+    contentDescription: "The MagiAttention project page changed since the previous digest run.",
+  },
+  {
+    name: "gpupuzzles.answer.ai",
+    indexUrl: "https://gpupuzzles.answer.ai/",
+    htmlUrl: "https://gpupuzzles.answer.ai",
+    trackPageContent: true,
+    includeUrlPatterns: ["^https://gpupuzzles\\.answer\\.ai/(intro|puzzles)"],
+    contentTitle: "WebGPU Puzzles updates",
+    contentDescription: "The WebGPU Puzzles page changed since the previous digest run.",
+  },
+  {
+    name: "stasosphere.com/machine-learning",
+    indexUrl: "https://stasosphere.com/machine-learning/",
+    htmlUrl: "https://stasosphere.com/machine-learning/",
+    trackPageContent: true,
+    contentTitle: "Stas Bekman ML engineering updates",
+    contentDescription: "The Stasosphere machine-learning engineering page changed since the previous digest run.",
+  },
 ];
 
 // ============================================================================
@@ -342,6 +492,22 @@ function stripHtml(html: string): string {
     .trim();
 }
 
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function normalizeUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    parsed.search = '';
+    if (parsed.pathname !== '/') parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 function extractCDATA(text: string): string {
   const cdataMatch = text.match(/<!\[CDATA\[([\s\S]*?)\]\]>/);
   return cdataMatch ? cdataMatch[1] : text;
@@ -441,6 +607,351 @@ function parseRSSItems(xml: string): Array<{ title: string; link: string; pubDat
   }
   
   return items;
+}
+
+// ============================================================================
+// Tracked Page Fetching
+// ============================================================================
+
+function attrValue(tag: string, attrName: string): string {
+  const pattern = new RegExp(`${attrName}\\s*=\\s*["']([^"']+)["']`, 'i');
+  return tag.match(pattern)?.[1] || '';
+}
+
+function matchesAnyPattern(value: string, patterns: string[] | undefined): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  return patterns.some(pattern => new RegExp(pattern, 'i').test(value));
+}
+
+function cleanTrackedPageTitle(text: string, fallbackUrl: string): string {
+  const cleaned = normalizeWhitespace(text
+    .replace(/\b(?:research|systems|methodology|alignment|interpretability|policy|science|societal impacts)\b/gi, ' ')
+    .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},\s+\d{4}\b/gi, ' ')
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' '));
+
+  if (cleaned) return cleaned;
+
+  try {
+    const url = new URL(fallbackUrl);
+    const slug = url.pathname.split('/').filter(Boolean).pop() || url.hostname;
+    return normalizeWhitespace(slug.replace(/\.(html|htm)$/i, '').replace(/[-_]+/g, ' '));
+  } catch {
+    return fallbackUrl;
+  }
+}
+
+export function parseTrackedPageDate(text: string, url?: string): Date | null {
+  const monthDate = text.match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t)?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2}),\s+(\d{4})\b/i);
+  if (monthDate) {
+    const parsed = new Date(`${monthDate[1]} ${monthDate[2]}, ${monthDate[3]} 00:00:00 UTC`);
+    if (!isNaN(parsed.getTime())) return parsed;
+  }
+
+  const isoDate = `${text} ${url || ''}`.match(/\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b/);
+  if (isoDate) {
+    const parsed = new Date(Date.UTC(Number(isoDate[1]), Number(isoDate[2]) - 1, Number(isoDate[3])));
+    if (!isNaN(parsed.getTime())) return parsed;
+  }
+
+  return null;
+}
+
+export function extractTrackedPageCandidates(html: string, source: TrackedPageSource): TrackedPageCandidate[] {
+  if (!source.includeUrlPatterns?.length) return [];
+
+  const candidates: TrackedPageCandidate[] = [];
+  const seen = new Set<string>();
+
+  if (/<urlset[\s>]|<loc[\s>]/i.test(html)) {
+    const urlPattern = /<url[\s>][\s\S]*?<\/url>/gi;
+    let urlMatch: RegExpExecArray | null;
+
+    while ((urlMatch = urlPattern.exec(html)) !== null) {
+      const entry = urlMatch[0];
+      const loc = stripHtml(getTagContent(entry, 'loc'));
+      if (!loc) continue;
+
+      const url = normalizeUrl(loc);
+      if (!matchesAnyPattern(url, source.includeUrlPatterns)) continue;
+      if (matchesAnyPattern(url, source.excludeUrlPatterns)) continue;
+      if (seen.has(url)) continue;
+      seen.add(url);
+
+      const lastmod = stripHtml(getTagContent(entry, 'lastmod'));
+      const title = cleanTrackedPageTitle('', url);
+      if (!title) continue;
+
+      candidates.push({
+        title,
+        url,
+        text: normalizeWhitespace(`${lastmod} ${title}`),
+        description: lastmod ? `Sitemap entry last modified ${lastmod}` : 'Sitemap entry',
+      });
+    }
+
+    return candidates.slice(0, source.limit || 40);
+  }
+
+  const anchorPattern = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = anchorPattern.exec(html)) !== null) {
+    const href = attrValue(match[1], 'href');
+    if (!href || href.startsWith('mailto:') || href.startsWith('javascript:')) continue;
+
+    let url: string;
+    try {
+      url = normalizeUrl(new URL(href, source.indexUrl).toString());
+    } catch {
+      continue;
+    }
+
+    if (source.includeUrlPatterns?.length && !matchesAnyPattern(url, source.includeUrlPatterns)) continue;
+    if (matchesAnyPattern(url, source.excludeUrlPatterns)) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+
+    const text = normalizeWhitespace(stripHtml(match[2]));
+    const title = cleanTrackedPageTitle(text, url);
+    if (!title) continue;
+
+    candidates.push({
+      title,
+      url,
+      text,
+      description: text,
+    });
+  }
+
+  return candidates.slice(0, source.limit || 40);
+}
+
+function sourceStateKey(source: TrackedPageSource): string {
+  return source.name;
+}
+
+function emptySourceState(now: Date): TrackedPageSourceState {
+  return {
+    initializedAt: now.toISOString(),
+    lastChecked: now.toISOString(),
+    links: {},
+  };
+}
+
+export function buildTrackedPageArticles(
+  source: TrackedPageSource,
+  candidates: TrackedPageCandidate[],
+  state: TrackedPageState,
+  now = new Date()
+): { articles: Article[]; state: TrackedPageState } {
+  const nextState: TrackedPageState = {
+    sources: { ...(state.sources || {}) },
+  };
+  const key = sourceStateKey(source);
+  const hadSourceState = Boolean(nextState.sources![key]);
+  const sourceState = nextState.sources![key] || emptySourceState(now);
+  const articles: Article[] = [];
+
+  for (const candidate of candidates) {
+    const published = parseTrackedPageDate(candidate.text, candidate.url);
+    const existing = sourceState.links[candidate.url];
+    const firstSeen = existing?.firstSeen || now.toISOString();
+    const pubDate = published
+      || (existing ? new Date(existing.firstSeen) : hadSourceState ? now : new Date(0));
+
+    sourceState.links[candidate.url] = {
+      title: candidate.title,
+      firstSeen,
+      lastSeen: now.toISOString(),
+      publishedAt: published?.toISOString() || existing?.publishedAt,
+    };
+
+    articles.push({
+      title: candidate.title,
+      link: candidate.url,
+      pubDate,
+      description: candidate.description || `Tracked page link discovered on ${source.indexUrl}`,
+      sourceName: source.name,
+      sourceUrl: source.htmlUrl,
+    });
+  }
+
+  sourceState.lastChecked = now.toISOString();
+  nextState.sources![key] = sourceState;
+  return { articles, state: nextState };
+}
+
+function extractMetaDescription(html: string): string {
+  const metaPattern = /<meta\b([^>]*)>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = metaPattern.exec(html)) !== null) {
+    const attrs = match[1];
+    const name = attrValue(attrs, 'name') || attrValue(attrs, 'property');
+    if (!/^(description|og:description)$/i.test(name)) continue;
+    const content = attrValue(attrs, 'content');
+    if (content) return normalizeWhitespace(stripHtml(content));
+  }
+  return '';
+}
+
+function extractPageTitle(html: string): string {
+  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '';
+  return normalizeWhitespace(stripHtml(title));
+}
+
+function stableContentHash(html: string): string {
+  const text = normalizeWhitespace(stripHtml(html)
+    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, '')
+    .replace(/\b20\d{2}-\d{2}-\d{2}T[^\s]+/g, ''));
+  return createHash('sha256').update(text).digest('hex');
+}
+
+function buildTrackedPageContentArticle(
+  source: TrackedPageSource,
+  html: string,
+  state: TrackedPageState,
+  now = new Date()
+): { article?: Article; state: TrackedPageState } {
+  const nextState: TrackedPageState = {
+    sources: { ...(state.sources || {}) },
+  };
+  const key = sourceStateKey(source);
+  const hadSourceState = Boolean(nextState.sources![key]);
+  const sourceState = nextState.sources![key] || emptySourceState(now);
+  const hash = stableContentHash(html);
+  const changed = hadSourceState && sourceState.pageHash !== hash;
+
+  sourceState.pageHash = hash;
+  sourceState.pageFirstSeen = sourceState.pageFirstSeen || now.toISOString();
+  sourceState.lastChecked = now.toISOString();
+  nextState.sources![key] = sourceState;
+
+  if (!changed) {
+    return { state: nextState };
+  }
+
+  return {
+    state: nextState,
+    article: {
+      title: source.contentTitle || extractPageTitle(html) || source.name,
+      link: source.htmlUrl,
+      pubDate: now,
+      description: source.contentDescription || extractMetaDescription(html) || `Tracked page content changed at ${source.indexUrl}`,
+      sourceName: source.name,
+      sourceUrl: source.htmlUrl,
+    },
+  };
+}
+
+async function readTrackedPageState(): Promise<TrackedPageState> {
+  try {
+    const text = await readFile(TRACKED_PAGE_STATE_PATH, 'utf8');
+    const parsed = JSON.parse(text) as TrackedPageState;
+    return { sources: parsed.sources || {} };
+  } catch {
+    return { sources: {} };
+  }
+}
+
+async function writeTrackedPageState(state: TrackedPageState): Promise<void> {
+  await mkdir(dirname(TRACKED_PAGE_STATE_PATH), { recursive: true });
+  await writeFile(TRACKED_PAGE_STATE_PATH, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+async function fetchTrackedPage(source: TrackedPageSource, state: TrackedPageState): Promise<{ articles: Article[]; state: TrackedPageState; failure?: FeedFailure }> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const controller = new AbortController();
+    timeout = setTimeout(() => controller.abort(), TRACKED_PAGE_FETCH_TIMEOUT_MS);
+
+    const response = await fetch(source.indexUrl, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'AI-Daily-Digest/1.0 (Page Tracker)',
+        'Accept': 'text/html,application/xhtml+xml,application/xml,text/xml,*/*',
+      },
+    });
+
+    clearTimeout(timeout);
+    timeout = undefined;
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const html = await response.text();
+    let nextState = state;
+    const articles: Article[] = [];
+
+    if (source.trackPageContent) {
+      const contentResult = buildTrackedPageContentArticle(source, html, nextState);
+      nextState = contentResult.state;
+      if (contentResult.article) articles.push(contentResult.article);
+    }
+
+    const candidates = extractTrackedPageCandidates(html, source);
+    const linkResult = buildTrackedPageArticles(source, candidates, nextState);
+    articles.push(...linkResult.articles);
+    nextState = linkResult.state;
+
+    console.log(`[digest] ✓ ${source.name}: ${candidates.length} tracked links${articles.length > candidates.length ? ', page changed' : ''}`);
+    return { articles, state: nextState };
+  } catch (error) {
+    if (timeout) clearTimeout(timeout);
+    const msg = error instanceof Error ? error.message : String(error);
+    const isTimeout = error instanceof Error && (error.name === 'AbortError' || msg.includes('abort'));
+    const reason = isTimeout ? 'timeout' : msg;
+    console.warn(`[digest] ✗ ${source.name}: ${reason}`);
+    return {
+      articles: [],
+      state,
+      failure: { name: source.name, xmlUrl: source.indexUrl, htmlUrl: source.htmlUrl, reason },
+    };
+  }
+}
+
+async function fetchTrackedPages(sources: TrackedPageSource[]): Promise<FeedFetchSummary> {
+  let state = await readTrackedPageState();
+  const allArticles: Article[] = [];
+  const failedFeeds: FeedFailure[] = [];
+  let successCount = 0;
+  let failCount = 0;
+
+  for (let i = 0; i < sources.length; i += TRACKED_PAGE_CONCURRENCY) {
+    const batch = sources.slice(i, i + TRACKED_PAGE_CONCURRENCY);
+    const results = await Promise.allSettled(batch.map(source => fetchTrackedPage(source, state)));
+
+    for (const [index, result] of results.entries()) {
+      const source = batch[index]!;
+      if (result.status === 'fulfilled') {
+        const sourceState = result.value.state.sources?.[sourceStateKey(source)];
+        state = {
+          sources: {
+            ...(state.sources || {}),
+            ...(sourceState ? { [sourceStateKey(source)]: sourceState } : {}),
+          },
+        };
+        if (result.value.failure) {
+          failCount++;
+          failedFeeds.push(result.value.failure);
+        } else {
+          successCount++;
+          allArticles.push(...result.value.articles);
+        }
+      } else {
+        failCount++;
+        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        failedFeeds.push({ name: source.name, xmlUrl: source.indexUrl, htmlUrl: source.htmlUrl, reason });
+      }
+    }
+
+    const progress = Math.min(i + TRACKED_PAGE_CONCURRENCY, sources.length);
+    console.log(`[digest] Page tracker progress: ${progress}/${sources.length} pages processed (${successCount} ok, ${failCount} failed)`);
+  }
+
+  await writeTrackedPageState(state);
+  console.log(`[digest] Fetched ${allArticles.length} tracked-page articles from ${successCount} pages (${failCount} failed)`);
+  return { articles: allArticles, failedFeeds, successCount, failCount };
 }
 
 // ============================================================================
@@ -1416,7 +1927,7 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
   const dateStr = now.toISOString().split('T')[0];
   
   let report = `# AI Daily Digest - ${dateStr}\n\n`;
-  report += `> ${articles.length} AI-selected article${articles.length === 1 ? '' : 's'} from ${stats.totalFeeds} curated technology feeds.\n\n`;
+  report += `> ${articles.length} AI-selected article${articles.length === 1 ? '' : 's'} from ${stats.totalFeeds} curated technology sources.\n\n`;
 
   // ── Today's Highlights ──
   if (highlights) {
@@ -1450,13 +1961,13 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
   // ── Visual Statistics ──
   report += `## Data Overview\n\n`;
 
-  report += `| Feeds | Articles | Time Range | Selected |\n`;
+  report += `| Sources | Articles | Time Range | Selected |\n`;
   report += `|:---:|:---:|:---:|:---:|\n`;
   report += `| ${stats.successFeeds}/${stats.totalFeeds} | ${stats.totalArticles} -> ${stats.filteredArticles} | ${stats.hours}h | **${articles.length}** |\n\n`;
 
   if (stats.failedFeeds.length > 0) {
-    report += `## Failed Feeds\n\n`;
-    report += `| Source | Issue | Feed URL |\n`;
+    report += `## Failed Sources\n\n`;
+    report += `| Source | Issue | Feed/Page URL |\n`;
     report += `|---|---|---|\n`;
     for (const failure of stats.failedFeeds) {
       report += `| ${escapeMarkdownTableCell(failure.name)} | ${escapeMarkdownTableCell(failure.reason)} | <${failure.xmlUrl}> |\n`;
@@ -1518,7 +2029,7 @@ function generateDigestReport(articles: ScoredArticle[], highlights: string, sta
   }
 
   // ── Footer ──
-  report += `*Generated at ${dateStr} ${now.toISOString().split('T')[1]?.slice(0, 5) || ''} | scanned ${stats.successFeeds} feeds | fetched ${stats.totalArticles} articles | selected ${articles.length} articles*\n`;
+  report += `*Generated at ${dateStr} ${now.toISOString().split('T')[1]?.slice(0, 5) || ''} | scanned ${stats.successFeeds} sources | fetched ${stats.totalArticles} articles | selected ${articles.length} articles*\n`;
   report += `*Based on Hacker News-popular technology feeds plus selected additional sources.*\n`;
 
   return report;
@@ -1559,7 +2070,7 @@ Examples:
   process.exit(0);
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.includes('--help') || args.includes('-h')) printUsage();
   
@@ -1628,12 +2139,16 @@ async function main(): Promise<void> {
   }
   console.log('');
   
-  console.log(`[digest] Step 1/5: Fetching ${RSS_FEEDS.length} RSS feeds...`);
+  console.log(`[digest] Step 1/5: Fetching ${RSS_FEEDS.length} RSS feeds and ${TRACKED_PAGES.length} tracked pages...`);
   const feedSummary = await fetchAllFeeds(RSS_FEEDS);
-  const allArticles = feedSummary.articles;
+  const trackedSummary = await fetchTrackedPages(TRACKED_PAGES);
+  const allArticles = [...feedSummary.articles, ...trackedSummary.articles];
+  const successSources = feedSummary.successCount + trackedSummary.successCount;
+  const failedSources = [...feedSummary.failedFeeds, ...trackedSummary.failedFeeds];
+  const failCount = feedSummary.failCount + trackedSummary.failCount;
   
   if (allArticles.length === 0) {
-    console.error('[digest] Error: No articles fetched from any feed. Check network connection.');
+    console.error('[digest] Error: No articles fetched from any source. Check network connection.');
     process.exit(1);
   }
   
@@ -1708,13 +2223,13 @@ async function main(): Promise<void> {
     : '';
   
   const report = generateDigestReport(finalArticles, highlights, {
-    totalFeeds: RSS_FEEDS.length,
-    successFeeds: feedSummary.successCount,
+    totalFeeds: RSS_FEEDS.length + TRACKED_PAGES.length,
+    successFeeds: successSources,
     totalArticles: allArticles.length,
     filteredArticles: recentArticles.length,
     hours,
     lang,
-    failedFeeds: feedSummary.failedFeeds,
+    failedFeeds: failedSources,
   });
   
   await mkdir(dirname(outputPath), { recursive: true });
@@ -1723,7 +2238,7 @@ async function main(): Promise<void> {
   console.log('');
   console.log(`[digest] ✅ Done!`);
   console.log(`[digest] 📁 Report: ${outputPath}`);
-  console.log(`[digest] 📊 Stats: ${feedSummary.successCount} sources -> ${allArticles.length} articles -> ${recentArticles.length} recent -> ${finalArticles.length} selected (${feedSummary.failCount} failed feeds)`);
+  console.log(`[digest] 📊 Stats: ${successSources} sources -> ${allArticles.length} articles -> ${recentArticles.length} recent -> ${finalArticles.length} selected (${failCount} failed sources)`);
   
   if (finalArticles.length > 0) {
     console.log('');
@@ -1736,7 +2251,9 @@ async function main(): Promise<void> {
   }
 }
 
-await main().catch((err) => {
-  console.error(`[digest] Fatal error: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+if (import.meta.main) {
+  await main().catch((err) => {
+    console.error(`[digest] Fatal error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}

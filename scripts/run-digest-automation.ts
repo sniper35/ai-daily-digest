@@ -1,7 +1,8 @@
+import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import process from 'node:process';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 type DigestConfig = {
   anthropicApiKey?: string;
@@ -62,15 +63,7 @@ if (process.argv.includes('--check-config')) {
 const now = new Date();
 const outputPath = resolve(outputDir, `ai-daily-digest-${stampForFilename(now)}.md`);
 
-process.chdir(repoRoot);
-process.env.ANTHROPIC_API_KEY = config.anthropicApiKey || '';
-process.env.ANTHROPIC_MODEL = config.anthropicModel || 'claude-sonnet-4-6';
-process.env.ANTHROPIC_EFFORT = config.anthropicEffort || 'xhigh';
-process.env.ANTHROPIC_MAX_TOKENS = String(config.anthropicMaxTokens || 100_000);
-process.env.ANTHROPIC_BATCH = String(config.anthropicBatch !== false);
-
-process.argv = [
-  process.argv[0] || 'bun',
+const digestRun = spawnSync(process.execPath, [
   digestScript,
   '--hours',
   String(config.timeRange || 48),
@@ -80,9 +73,30 @@ process.argv = [
   'en',
   '--output',
   outputPath,
-];
+], {
+  cwd: repoRoot,
+  env: {
+    ...process.env,
+    ANTHROPIC_API_KEY: config.anthropicApiKey || '',
+    ANTHROPIC_MODEL: config.anthropicModel || 'claude-sonnet-4-6',
+    ANTHROPIC_EFFORT: config.anthropicEffort || 'xhigh',
+    ANTHROPIC_MAX_TOKENS: String(config.anthropicMaxTokens || 100_000),
+    ANTHROPIC_BATCH: String(config.anthropicBatch !== false),
+  },
+  stdio: 'inherit',
+});
 
-await import(pathToFileURL(digestScript).href);
+if (digestRun.error) {
+  throw digestRun.error;
+}
+
+if (digestRun.status !== 0) {
+  throw new Error(`Digest script failed with status ${digestRun.status ?? `signal ${digestRun.signal}`}`);
+}
+
+if (!existsSync(outputPath)) {
+  throw new Error(`Digest completed without writing expected output: ${outputPath}`);
+}
 
 copyFileSync(outputPath, latestDigestPath);
 writeFileSync(
@@ -92,10 +106,10 @@ writeFileSync(
     outputPath,
     latestDigestPath,
     config: {
-      anthropicModel: process.env.ANTHROPIC_MODEL,
-      anthropicEffort: process.env.ANTHROPIC_EFFORT,
-      anthropicMaxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS),
-      anthropicBatch: process.env.ANTHROPIC_BATCH === 'true',
+      anthropicModel: config.anthropicModel || 'claude-sonnet-4-6',
+      anthropicEffort: config.anthropicEffort || 'xhigh',
+      anthropicMaxTokens: config.anthropicMaxTokens || 100_000,
+      anthropicBatch: config.anthropicBatch !== false,
       timeRange: config.timeRange || 48,
       topN: config.topN || 25,
       language: 'en',
